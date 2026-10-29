@@ -18,7 +18,9 @@ variables:
   ops_schema:
     default: ops
   source_table:
-    default: precisely_product_share.addressing.adf_usa
+    default: precisely_product_share.precisely_db_property_graph.adf_usa
+  changefile_table:
+    default: precisely_product_share.precisely_db_property_graph.adf_usa_changefile
   alert_email:
     default: mayank.kasturia@precisely.com
 

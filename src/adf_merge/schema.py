@@ -1,4 +1,4 @@
-"""Column contract for adf_usa (source: precisely_product_share.addressing.adf_usa).
+"""Column contract for adf_usa (source: precisely_product_share.precisely_db_property_graph.adf_usa).
 
 Order matters: HASH_COLUMNS defines the canonical order used by the row hash.
 Changing it, or the column set, is a hash-spec change (bump HASH_SPEC_VERSION).

@@ -108,7 +108,7 @@ Then copy that version of the main table. The share keeps only about 7 days of h
 databricks experimental aitools tools query --profile DEFAULT "
 CREATE TABLE address_book.bronze.adf_usa_baseline
 TBLPROPERTIES ('release_version' = '<release_version>')
-AS SELECT * FROM precisely_product_share.addressing.adf_usa VERSION AS OF <source_version>"
+AS SELECT * FROM precisely_product_share.precisely_db_property_graph.adf_usa VERSION AS OF <source_version>"
 ```
 
 The row count must equal `row_count` from the previous command (the bootstrap checks it).
@@ -192,6 +192,19 @@ The job runs daily at 06:30 UTC (`resources/adf_usa_release.job.yml`, `pause_sta
 
 ## Operating it
 
+* **Job parameters** (job `adf-usa-release`, defaults from the bundle variables in `databricks.yml`):
+
+  | Parameter | Default | Meaning |
+  |---|---|---|
+  | `catalog` | `address_book` | Target catalog (schemas `bronze`, `ops`, `silver`) |
+  | `source_table` | `precisely_product_share.precisely_db_property_graph.adf_usa` | Main table Delta Share |
+  | `changefile_table` | `precisely_product_share.precisely_db_property_graph.adf_usa_changefile` | Changefile Delta Share |
+
+  Override for one run: `databricks bundle run adf_usa_release -t prod --params catalog=my_catalog,source_table=...,changefile_table=...`
+  (or "Run now with different parameters" in the UI). To change the scheduled defaults, edit the variables in `databricks.yml`
+  (or `--var catalog=...` at deploy). A new catalog also needs steps 4 to 6 (DDL, baseline, bootstrap) run against it,
+  using that catalog name. The pins in `ops.release_label` are Delta versions of the source table, so switching
+  `source_table` on an existing install also means re-pinning (version numbers differ between shares).
 * **Configuration**: job parameters in `resources/adf_usa_release.job.yml` (`use-changefile`, `audit`,
   `changefile-wait-days` (default 3), `require-confirmed`, `allow-large-change`).
   `changefile-wait-days: 0` applies by MERGE right away instead of waiting for the changefile.

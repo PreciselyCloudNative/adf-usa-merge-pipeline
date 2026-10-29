@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from adf_merge.hashing import HASH_SPEC_VERSION, row_hash_expr
 from adf_merge.schema import HASH_COLUMNS, KEY_COLUMN, SOURCE_COLUMNS
 
-DEFAULT_SOURCE_TABLE = "precisely_product_share.addressing.adf_usa"
+DEFAULT_SOURCE_TABLE = "precisely_product_share.precisely_db_property_graph.adf_usa"
 DEFAULT_CHANGEFILE_TABLE = "precisely_product_share.precisely_db_property_graph.adf_usa_changefile"
 ATTR_COLUMNS = [c for c in SOURCE_COLUMNS if c != KEY_COLUMN]
 EXPECTED_TYPES = {KEY_COLUMN: "string", **{n: t for n, t in HASH_COLUMNS}}
