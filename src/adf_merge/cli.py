@@ -4,6 +4,7 @@ import argparse
 import json
 
 from adf_merge.detect import run_detect, run_pending
+from adf_merge.maintenance import after_releases
 from adf_merge.release import DEFAULT_SOURCE_TABLE, Params, to_json
 
 
@@ -46,7 +47,10 @@ def release_main(argv=None) -> None:
         max_row_count_change_pct=a.max_row_count_change_pct,
         deleted_tolerance=a.deleted_tolerance,
     )
-    print(to_json(run_pending(_spark(), p, require_confirmed=a.require_confirmed.lower() == "true")))
+    spark = _spark()
+    out = run_pending(spark, p, require_confirmed=a.require_confirmed.lower() == "true")
+    out["maintenance"] = after_releases(spark, p, out["applied"])
+    print(to_json(out))
 
 
 if __name__ == "__main__":

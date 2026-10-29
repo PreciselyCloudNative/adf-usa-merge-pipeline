@@ -9,7 +9,7 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from adf_merge import detect, release
+from adf_merge import detect, maintenance, release
 from adf_merge.hashing import HASH_SPEC_VERSION
 from adf_merge.release import GateError, Params
 from adf_merge.schema import HASH_COLUMNS, SOURCE_COLUMNS
@@ -43,12 +43,14 @@ class Env:
         self.spark, self.catalog = spark, catalog
         tag = uuid.uuid4().hex[:8]
         self.src_schema, self.bronze, self.ops = f"zz_syn_src_{tag}", f"zz_syn_bronze_{tag}", f"zz_syn_ops_{tag}"
+        self.silver = f"zz_syn_silver_{tag}"
         self.src = f"{catalog}.{self.src_schema}.adf_usa"
         for s in (self.src_schema, self.bronze, self.ops):
             spark.sql(f"CREATE SCHEMA {catalog}.{s}")
-        for f in sorted(Path(ddl_dir).glob("*.sql")):
+        for f in sorted(Path(ddl_dir).glob("0*.sql")):
             text = f.read_text().replace("${catalog}.bronze.", f"{catalog}.{self.bronze}.")
             text = text.replace("${catalog}.ops.", f"{catalog}.{self.ops}.")
+            text = text.replace("${catalog}.silver", f"{catalog}.{self.silver}")
             for stmt in (s.strip() for s in text.split(";")):
                 if stmt:
                     spark.sql(stmt)
@@ -155,7 +157,7 @@ class Env:
         return r[0].asDict() if r else None
 
     def drop(self):
-        for s in (self.src_schema, self.bronze, self.ops):
+        for s in (self.src_schema, self.bronze, self.ops, self.silver):
             self.sql(f"DROP SCHEMA IF EXISTS {self.catalog}.{s} CASCADE")
 
 
@@ -401,6 +403,42 @@ def s15_detect_anomalies(env: Env):
     # garbage vintage
     env.sql(f"ALTER TABLE {env.src} SET TBLPROPERTIES ('precisely.data.vintage' = 'oct-2026')")
     raises(detect.DetectError, lambda: detect.run_detect(env.spark, env.p), "YYYY.MM.N")
+
+
+def s16_maintenance_after_deletes(env: Env):
+    env.src_delete(300, 310)
+    env.src_update(0, 3, "CITY = 'M'")
+    pin = env.mark_release("2099.01.1")
+    env.label("2099.01.1", pin, added=0, updated=3, deleted=10)
+    r = env.run("2099.01.1")
+    before = env.sql(f"SELECT count(*), sum(cast(xxhash64(PBKEY, row_hash) as decimal(38,0))) FROM {env.p.current}").collect()[0]
+    did = maintenance.after_releases(env.spark, env.p, [r])
+    eq(did, {"purged": True, "vacuumed": True}, "maintenance ran")
+    after = env.sql(f"SELECT count(*), sum(cast(xxhash64(PBKEY, row_hash) as decimal(38,0))) FROM {env.p.current}").collect()[0]
+    eq(tuple(after), tuple(before), "maintenance does not change table content")
+    t = env.row(305)
+    check(t["status"] == "DELETED" and t["CITY"] is None, "tombstone still nulled")
+    eq(maintenance.after_releases(env.spark, env.p, [{"result": "noop"}]), {"purged": False, "vacuumed": False}, "noop does nothing")
+
+
+def s17_silver_views(env: Env):
+    env.src_insert(N, N + 8)
+    env.src_update(0, 4, "CITY = 'V'")
+    env.src_delete(400, 406)
+    pin = env.mark_release("2099.01.1")
+    env.label("2099.01.1", pin, added=8, updated=4, deleted=6)
+    env.run("2099.01.1")
+    v = f"{env.catalog}.{env.silver}"
+    eq(env.sql(f"SELECT count(*) FROM {v}.adf_usa_current").collect()[0][0], N + 2, "current view = live rows")
+    cols = set(env.sql(f"SELECT * FROM {v}.adf_usa_current LIMIT 1").columns)
+    check("row_hash" not in cols and "hash_spec_version" not in cols and "CITY" in cols, "current view hides hash internals")
+    feed = {r["status"]: r["n"] for r in env.sql(f"SELECT status, count(*) n FROM {v}.adf_usa_change_feed GROUP BY 1").collect()}
+    eq(feed, {"ADDED": 8, "UPDATED": 4, "DELETED": 6}, "feed excludes baseline, includes tombstones")
+    gone = env.sql(f"SELECT count(*) FROM {v}.adf_usa_change_feed WHERE status='DELETED' AND (CITY IS NOT NULL OR LATITUDE IS NOT NULL)").collect()[0][0]
+    eq(gone, 0, "tombstones expose no attributes")
+    eq(env.sql(f"SELECT count(*) FROM {v}.adf_usa_change_log WHERE release_seq = 2").collect()[0][0], 18, "change log view")
+    rel = env.sql(f"SELECT release_version, added, updated, deleted FROM {v}.adf_usa_releases WHERE release_seq = 2").collect()[0]
+    eq(tuple(rel), ("2099.01.1", 8, 4, 6), "releases view")
 
 
 SCENARIOS = [v for k, v in sorted(globals().items()) if re.match(r"s\d\d_", k)]

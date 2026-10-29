@@ -149,3 +149,13 @@ fit via the databricks skills). 3. Only then build.
 - Synthetic suite `tests/synthetic/scenarios.py` (run via `scripts/run_synthetic.py` on Databricks, throwaway schemas): 15 scenarios pass (normal, resurrection, hash sensitivity, rebuild, large-change gate, schema drift, bad data, vendor count, validation failure + rollback, idempotent rerun, crash recovery, detect + Thursday delete, missed releases, expired pin, detect anomalies). Local tests: 25 pass.
 - Shadow run of the deployed job on the real share: detect seeded nothing, release applied nothing (2026.10.2 already COMPLETE).
 - Remaining: shadow-run through the next real release (2026.11.0 / next weekly), then unpause the schedule; Phase 6 (silver views, grants, drop baseline by 2026-11-11, purge/VACUUM); confirm 2026.10.2 label vs Precisely doc on 10-30; push/PR only after Phase 6.
+
+## Phase 6 DONE 2026-10-29
+- 2026.10.2 CONFIRMED vs the Precisely weekly doc (9,467 / 3,389 / 229, release date 2026-10-29). 2026.10.1 doc: 11,738 added / 5,200 updated / 23 deleted. Vendor changefile (`precisely_product_share.precisely_db_property_graph.adf_usa_changefile`) matches our MERGE-derived change set key-for-key for 2026.10.2.
+- silver views created (sql/ddl/03_silver_views.sql): `adf_usa_current` (live rows, no hash cols), `adf_usa_change_feed` (non-baseline rows incl. tombstones), `adf_usa_change_log`, `adf_usa_releases`. Grants NOT issued: `sql/grants.template.sql` (consumer group still to be named). Views run with owner rights, consumers need silver only.
+- maintenance.py: REORG ... APPLY (PURGE) after any release with deletes, VACUUM after any applied release (in the `release` task). Run once manually on 2026-10-29 (229 tombstones).
+- Baseline table `bronze.adf_usa_baseline_2026_10_1` DROPPED 2026-10-29 (UC UNDROP window 7 days). Rollback of 2026.10.2 (RESTORE current to v1) only works until ~2026-11-04 (7-day retention).
+- Synthetic suite now 17 scenarios (adds maintenance, silver views), all pass.
+- Not pushed. User wants push/PR only after Phase 6 -> awaiting go-ahead.
+## Changefile (found 2026-10-29)
+`adf_usa_changefile`: full-replace per release (only the latest release's changes, v0 CREATE, v1 CTAS, v2 SET TBLPROPERTIES vintage/count=13085). Columns = adf cols + CHANGE (A/U/D), CHG_CODE (NEW/BAD/DUPLICATE/''), PBKEY_ALT (set for DUPLICATE). LATITUDE/LONGITUDE decimal(11,6) (not double). D rows carry full attributes. Plan: changefile primary, MERGE fallback + audit (design pending user approval).
