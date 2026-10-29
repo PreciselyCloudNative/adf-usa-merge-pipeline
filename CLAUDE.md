@@ -7,7 +7,10 @@
 - **Phase 1+2 DONE 2026-10-28 (STOP 1 reached)**: created `ops.release_label`, `ops.release_log`, `bronze.adf_usa_current`, `bronze.adf_usa_change_log` from repo DDL; loaded `adf_usa_current` from the baseline via serverless
   run (194,466,619 rows, all PBKEY and row_hash distinct, 0 null hash, status BASELINE, release 2026.10.1, seq 1). Seeded release_label (10.1 CONFIRMED v219; 10.2 PROPOSED v227) and release_log (10.1 COMPLETE).
 - Repo: https://github.com/PreciselyCloudNative/adf-usa-merge-pipeline (private, EMPTY, nothing pushed). Local repo: `adf-usa-merge-pipeline/`, branch `feat/bootstrap-ddl-and-hash`. Run identity = the user. No dev catalog.
-- Next: STOP 1 review -> Phase 4 manual 2026.10.2 merge (wait for the doc on 2026-10-30; source v227 readable until ~11-04).
+- **Phase 4 DONE 2026-10-28 (STOP 2 reached)**: release 2026.10.2 applied from source pin v227 (seq 2). Dry run then real MERGE both gave 9,467 ADDED / 3,389 UPDATED / 229 DELETED / 0 reappeared; live rows 194,475,857 = pinned source; fingerprint matched.
+  adf_usa_current is at Delta version 2; rollback to the pre-2026.10.2 state = `RESTORE TABLE ... TO VERSION AS OF 1` (recorded as release_log.current_table_version for 2026.10.1). release_label 2026.10.2 stays PROPOSED until the Precisely doc (10-30) confirms the counts.
+  Code: src/adf_merge/release.py (+ scripts/run_release.py notebook). Local tests: 15 pass. NOT yet tested: synthetic scenario matrix (resurrection, rebuild, schema drift, rerun) -> do in Phase 5.
+- (superseded) Next: STOP 1 review -> Phase 4 manual 2026.10.2 merge (wait for the doc on 2026-10-30; source v227 readable until ~11-04).
 - Next step: get explicit approval on the "Open decisions" below, then review the design with agents, then build.
 - Do NOT create Databricks jobs/tables or write pipeline code until the user approves.
 
