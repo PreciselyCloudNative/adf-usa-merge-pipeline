@@ -25,7 +25,7 @@ flowchart TD
 ```
 
 * **Primary path: the changefile** (`precisely_product_share.precisely_db_property_graph.adf_usa_changefile`, rows with
-  `CHANGE` = A/U/D). It lands about two days after the main table's release marker and holds only the latest release.
+  `CHANGE` = A/U/D). Precisely now publishes it the same day as the main table's release marker; it holds only the latest release.
   LATITUDE/LONGITUDE are `decimal(11,6)` and are cast to double before hashing (hash-identical to the main table).
 * **Fallback and audit: the hash MERGE** against the main table pinned at the vendor's release commit. After a changefile
   apply, a content fingerprint is compared to the pinned main table (audit PASSED; SKIPPED if the 7-day pin has expired).
@@ -157,8 +157,13 @@ databricks bundle run adf_usa_release -t prod --profile DEFAULT
 
 `adf-detect` finds vintages newer than the baseline and seeds PROPOSED labels. `adf-release` applies every pending release
 in order. The task output is JSON; look for `"method": "CHANGEFILE"` and `"audit": "PASSED"`.
+
+The job takes three parameters: `catalog`, `source_table` (main table share) and `changefile_table` (changefile share).
+The defaults are set in `databricks.yml`; to use others for a run add
+`--params catalog=<catalog>,source_table=<share>.<schema>.adf_usa,changefile_table=<share>.<schema>.adf_usa_changefile`
+(full table in "Operating it" below).
 If the baseline is already the newest release, the run reports nothing pending: that is normal. Run it again after the
-next Precisely release (weekly), once its changefile has landed (about 2 days later).
+next Precisely release (weekly), once its changefile has landed (normally the same day).
 
 ### 9. Verify
 
