@@ -1,18 +1,17 @@
-# ADF USA Incremental Merge Pipeline — DESIGN PHASE (no code, no jobs yet)
+# ADF USA Incremental Release Pipeline
 
-## Status
-- Design agreed in conversation on 2026-10-28. No pipeline code or jobs exist yet.
-- **Created 2026-10-28 (user said "go")**: schemas `address_book.bronze` and `address_book.ops`; table `address_book.bronze.adf_usa_baseline_2026_10_1`
-  (CTAS of source VERSION AS OF 219; verified 194,466,619 rows, 194,466,619 distinct PBKEY, 0 null PBKEY, 32 cols; props release_version=2026.10.1, retention.drop_by=2026-11-11). Nothing else exists yet.
-- **Phase 1+2 DONE 2026-10-28 (STOP 1 reached)**: created `ops.release_label`, `ops.release_log`, `bronze.adf_usa_current`, `bronze.adf_usa_change_log` from repo DDL; loaded `adf_usa_current` from the baseline via serverless
-  run (194,466,619 rows, all PBKEY and row_hash distinct, 0 null hash, status BASELINE, release 2026.10.1, seq 1). Seeded release_label (10.1 CONFIRMED v219; 10.2 PROPOSED v227) and release_log (10.1 COMPLETE).
-- Repo: https://github.com/PreciselyCloudNative/adf-usa-merge-pipeline (private, EMPTY, nothing pushed). Local repo: `adf-usa-merge-pipeline/`, branch `feat/bootstrap-ddl-and-hash`. Run identity = the user. No dev catalog.
-- **Phase 4 DONE 2026-10-28 (STOP 2 reached)**: release 2026.10.2 applied from source pin v227 (seq 2). Dry run then real MERGE both gave 9,467 ADDED / 3,389 UPDATED / 229 DELETED / 0 reappeared; live rows 194,475,857 = pinned source; fingerprint matched.
-  adf_usa_current is at Delta version 2; rollback to the pre-2026.10.2 state = `RESTORE TABLE ... TO VERSION AS OF 1` (recorded as release_log.current_table_version for 2026.10.1). release_label 2026.10.2 stays PROPOSED until the Precisely doc (10-30) confirms the counts.
-  Code: src/adf_merge/release.py (+ scripts/run_release.py notebook). Local tests: 15 pass. NOT yet tested: synthetic scenario matrix (resurrection, rebuild, schema drift, rerun) -> do in Phase 5.
-- (superseded) Next: STOP 1 review -> Phase 4 manual 2026.10.2 merge (wait for the doc on 2026-10-30; source v227 readable until ~11-04).
-- Next step: get explicit approval on the "Open decisions" below, then review the design with agents, then build.
-- Do NOT create Databricks jobs/tables or write pipeline code until the user approves.
+## CURRENT STATE (read this first; updated 2026-10-29)
+- **Built, deployed, running.** Everything below the "HISTORY" marker is the design log and partly superseded; trust this section and `README.md`.
+- **What it does**: applies each Precisely `adf_usa` release (weekly X.Y.1.., monthly X.0) to `address_book.bronze.adf_usa_current` so only ADDED/UPDATED/DELETED rows carry the new release. Consumers read `address_book.silver.*` views (grants: `account users`, USE CATALOG + USE SCHEMA/SELECT on silver).
+- **Primary path = Precisely's changefile** (`precisely_product_share.precisely_db_property_graph.adf_usa_changefile`, CHANGE A/U/D, decimal(11,6) coords cast to double, hash-identical). **Fallback + audit = hash-diff MERGE** against the main table pinned at the vendor's release commit. Changefile lands ~2 days after the main release; the job waits up to 3 days (`changefile-wait-days`), then MERGEs. A missed release always takes the MERGE. Any validation/audit failure -> `rollback_release` -> MERGE. See `src/adf_merge/changefile.py`, `release.py`, `detect.py`.
+- **Run**: DAB bundle `adf-usa-merge-pipeline`, target `prod`, job `adf-usa-release` (tasks `detect` -> `release`, serverless, runs as mayank.kasturia@precisely.com), daily 06:30 UTC, **UNPAUSED** (user chose to enable on 2026-10-29; failures email the user). The job does NOT pull from GitHub: it runs the wheel last deployed with `databricks bundle deploy -t prod --profile DEFAULT`. No CI deploy workflow exists (user said not needed): after merging to main, someone must redeploy by hand.
+- **Verified end to end 2026-10-29** from a fresh clone of main: bootstrap from the 2026.10.1 baseline, then the job applied 2026.10.2 via CHANGEFILE, audit PASSED, 9,467 / 3,389 / 229, 194,475,857 live rows. Local tests 25 pass; 26 synthetic scenarios pass on Databricks.
+- **Next real test**: the release around 2026-11-05 is the first one that sees a changefile not already applied; it also applies the 2026-10-29 Thursday NJ delete (v230, 71 rows). Check `ops.release_log` (method CHANGEFILE, audit PASSED, else method MERGE + fallback_reason).
+- **Repo**: https://github.com/PreciselyCloudNative/adf-usa-merge-pipeline (main has everything; PRs #1-#3 merged). Workflow: branch -> PR -> user merges (merging is blocked for the agent) -> redeploy.
+- **Gotchas**: the share only keeps ~7 days of history, so a baseline must be taken from the CURRENT release (`scripts/latest_release.py`; README steps 5-6). Rollback works only inside 7 days. Bundle files live at `/Workspace/Users/mayank.kasturia@precisely.com/.bundle/adf-usa-merge-pipeline/files`. Synthetic tests use throwaway `zz_syn_*` schemas. Leftover table `bronze.adf_usa_baseline_2026_10_1` is unused and can be dropped.
+- **Open items**: vendor delete-count gap of 2-36 in older releases is unexplained; optional asks to Precisely (append-only changefile history >= 90 days, release_version/date columns, PBKEY_ALT semantics, changefile landing with the release); `require-confirmed` is false (PROPOSED labels apply automatically, gated by counts/schema/fingerprint).
+
+## HISTORY (design log, 2026-10-26..28; partly superseded)
 
 ## Goal
 Consume Precisely's Address Fabric USA (`adf_usa`) shared via Delta Sharing and identify, per release, only the
