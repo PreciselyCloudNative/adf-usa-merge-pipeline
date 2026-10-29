@@ -5,15 +5,23 @@ Incremental release pipeline for **Address Fabric USA** (`adf_usa`, Delta Sharin
 records that were **ADDED / UPDATED / DELETED** carry the new release version. Unchanged rows are never rewritten, so
 downstream jobs only reprocess the change set.
 
-## How a release is applied
+## Architecture
 
-```
-daily job (06:30 UTC)            adf-detect                      adf-release
-                                 reads the share's history       for each pending release, in order:
-                                 for a new precisely.data.vintage  1. changefile ready and consistent?   -> apply it   (method CHANGEFILE)
-                                 and seeds a PROPOSED label        2. not there yet (< 3 days)?          -> wait       (deferred)
-                                                                   3. anything wrong / missed release?   -> hash MERGE (method MERGE)
-                                                                 then validate, audit, purge + vacuum
+```mermaid
+flowchart TD
+    V[("Precisely share<br/>adf_usa (main table)")] -->|"daily poll: new precisely.data.vintage?"| D["adf-detect<br/>seeds a PROPOSED release label + source pin"]
+    D --> R{"adf-release<br/>pending release, in order"}
+    CF[("adf_usa_changefile<br/>CHANGE = A / U / D<br/>lands ~2 days after the main table")] --> G
+    R --> G{"Changefile at this release<br/>and consistent with our table?"}
+    G -- "yes: PRIMARY" --> A["Apply changefile<br/>one MERGE by PBKEY<br/>method = CHANGEFILE"]
+    G -- "not there yet (< 3 days)" --> W["Wait: job retries on the next run"]
+    G -- "no / failed gate / missed release: FALLBACK" --> M["Hash-diff MERGE<br/>vendor main table pinned at the release commit<br/>method = MERGE"]
+    A --> AU{"Validate and audit<br/>counts vs changefile + vendor document<br/>fingerprint vs pinned main table"}
+    AU -- "pass" --> OK
+    AU -- "fail" --> RB["Roll back the release"] --> M
+    M --> OK[("bronze.adf_usa_current<br/>+ change_log, ops.release_log")]
+    OK --> S["silver views for consumers<br/>current, change_feed, releases"]
+    OK --> MT["REORG PURGE after deletes, VACUUM"]
 ```
 
 * **Primary path: the changefile** (`precisely_product_share.precisely_db_property_graph.adf_usa_changefile`, rows with
@@ -73,8 +81,8 @@ databricks bundle validate --strict -t prod --profile DEFAULT
 databricks bundle deploy -t prod --profile DEFAULT
 ```
 
-This creates the job `adf-usa-release` (tasks `adf-detect` -> `adf-release`, serverless, schedule **PAUSED**) and syncs the
-repo to `/Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/prod/files`. Catalog and schema names are bundle variables
+This creates the job `adf-usa-release` (tasks `adf-detect` -> `adf-release`, serverless, daily schedule) and syncs the
+repo to `/Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/files`. Catalog and schema names are bundle variables
 in `databricks.yml` (`--var catalog=...` to override).
 
 ### 4. Create the schemas and tables
@@ -85,42 +93,52 @@ python3 scripts/apply_ddl.py --profile DEFAULT --catalog address_book
 
 Creates `bronze`, `ops` and `silver` plus all tables and views from `sql/ddl/`. Safe to re-run.
 
-### 5. Freeze the baseline (release 2026.10.1)
+### 5. Pick the baseline release and freeze it
 
-The baseline is the vendor table at the commit that carries 2026.10.1 (Delta version 219). The share keeps only about
-7 days of history, so do this while that version is readable:
+A fresh install starts from whatever release Precisely has published **now**. Ask the share which one that is:
+
+```bash
+python3 scripts/latest_release.py --profile DEFAULT
+# {"release_version": "<X.Y.Z>", "source_version": <N>, "row_count": <rows>, "committed_at": "..."}
+```
+
+Then copy that version of the main table. The share keeps only about 7 days of history, so do this right away:
 
 ```bash
 databricks experimental aitools tools query --profile DEFAULT "
-CREATE TABLE address_book.bronze.adf_usa_baseline_2026_10_1
-TBLPROPERTIES ('release_version' = '2026.10.1')
-AS SELECT * FROM precisely_product_share.addressing.adf_usa VERSION AS OF 219"
+CREATE TABLE address_book.bronze.adf_usa_baseline
+TBLPROPERTIES ('release_version' = '<release_version>')
+AS SELECT * FROM precisely_product_share.addressing.adf_usa VERSION AS OF <source_version>"
 ```
 
-Expected: 194,466,619 rows, unique PBKEY (the bootstrap checks this).
+The row count must equal `row_count` from the previous command (the bootstrap checks it).
 
 ### 6. Load `adf_usa_current` from the baseline and seed the labels
 
 `scripts/bootstrap_load_current.py` is a notebook. It hashes the baseline into `adf_usa_current` (status BASELINE, seq 1),
-seeds `ops.release_label` (2026.10.1 and 2026.10.2 with the document counts) and writes the baseline row of `ops.release_log`.
-It refuses to run twice.
+seeds `ops.release_label` with the baseline release and writes the baseline row of `ops.release_log`.
+It refuses to run twice. Use the three values from step 5:
 
 ```bash
-ROOT=/Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/prod/files
+ROOT=/Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/files
 databricks workspace import $ROOT/scripts/bootstrap_load_current --file scripts/bootstrap_load_current.py \
   --format SOURCE --language PYTHON --overwrite --profile DEFAULT
 cat > /tmp/bootstrap.json <<JSON
 {"run_name": "adf-bootstrap",
  "tasks": [{"task_key": "main",
    "notebook_task": {"notebook_path": "$ROOT/scripts/bootstrap_load_current",
-                     "base_parameters": {"catalog": "address_book", "src_path": "$ROOT/src"}},
+                     "base_parameters": {"catalog": "address_book", "src_path": "$ROOT/src",
+                                         "baseline_table": "adf_usa_baseline",
+                                         "release_version": "<release_version>",
+                                         "source_version": "<source_version>",
+                                         "expected_rows": "<row_count>"}},
    "environment_key": "e"}],
  "environments": [{"environment_key": "e", "spec": {"client": "4"}}]}
 JSON
 databricks jobs submit --json @/tmp/bootstrap.json --profile DEFAULT
 ```
 
-Check: `SELECT status, count(*) FROM address_book.bronze.adf_usa_current GROUP BY 1` gives 194,466,619 BASELINE.
+Check: `SELECT status, count(*) FROM address_book.bronze.adf_usa_current GROUP BY 1` gives `row_count` rows, all BASELINE.
 
 ### 7. Create the consumer grants (once)
 
@@ -137,9 +155,10 @@ Use a narrower group when you have one (see `sql/grants.template.sql`).
 databricks bundle run adf_usa_release -t prod --profile DEFAULT
 ```
 
-`adf-detect` finds the vendor's newer vintages and seeds labels. `adf-release` then applies every pending release in order.
-Starting from the 2026.10.1 baseline this applies 2026.10.2 (9,467 added / 3,389 updated / 229 deleted).
-The task output is JSON; look for `"method": "CHANGEFILE"` and `"audit": "PASSED"`.
+`adf-detect` finds vintages newer than the baseline and seeds PROPOSED labels. `adf-release` applies every pending release
+in order. The task output is JSON; look for `"method": "CHANGEFILE"` and `"audit": "PASSED"`.
+If the baseline is already the newest release, the run reports nothing pending: that is normal. Run it again after the
+next Precisely release (weekly), once its changefile has landed (about 2 days later).
 
 ### 9. Verify
 
@@ -156,20 +175,20 @@ SELECT * FROM address_book.silver.adf_usa_releases;
 SELECT status, release_version, count(*) FROM address_book.silver.adf_usa_change_feed GROUP BY 1, 2;
 ```
 
-For 2026.10.2 expect `method = CHANGEFILE`, `audit = PASSED`, counts 9,467 / 3,389 / 229 and 194,475,857 live rows
-(`silver.adf_usa_current`). A `MERGE` method with a `fallback_reason` means the changefile was rejected and the MERGE took over.
+Per applied release expect `method = CHANGEFILE`, `audit = PASSED`, added/updated/deleted equal to the Precisely document, and
+live rows in `silver.adf_usa_current` equal to the release's row count. A `MERGE` method with a `fallback_reason` means the
+changefile was rejected and the MERGE took over.
 
-### 10. Drop the baseline table and turn on the schedule
+### 10. Drop the baseline table, schedule
 
-After the first release is verified:
+After the baseline is loaded and verified:
 
 ```bash
-databricks experimental aitools tools query --profile DEFAULT "DROP TABLE address_book.bronze.adf_usa_baseline_2026_10_1"
+databricks experimental aitools tools query --profile DEFAULT "DROP TABLE address_book.bronze.adf_usa_baseline"
 ```
 
-Then set `pause_status: UNPAUSED` in `resources/adf_usa_release.job.yml`, push through a PR, and redeploy (step 3).
-Run the first real new release (next weekly or `X.0`) manually before unpausing: it is the first run that sees
-a changefile that was not already applied.
+The job runs daily at 06:30 UTC (`resources/adf_usa_release.job.yml`, `pause_status: UNPAUSED`). To pause it, set
+`PAUSED`, push through a PR and redeploy (step 3). Failures email `alert_email` (`databricks.yml`).
 
 ## Operating it
 
