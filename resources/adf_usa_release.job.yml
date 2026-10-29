@@ -4,6 +4,15 @@ resources:
       name: adf-usa-release
       description: Poll the vendor share for a new adf_usa release, then MERGE each pending release into adf_usa_current.
       max_concurrent_runs: 1
+      # Run-time overridable (UI "Run now with different parameters", or `bundle run --params`). Defaults come from
+      # the bundle variables in databricks.yml.
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: source_table
+          default: ${var.source_table}
+        - name: changefile_table
+          default: ${var.changefile_table}
       performance_target: STANDARD
       schedule:
         quartz_cron_expression: "0 30 6 * * ?"
@@ -25,10 +34,10 @@ resources:
             package_name: adf_merge
             entry_point: adf-detect
             named_parameters:
-              catalog: ${var.catalog}
+              catalog: "{{job.parameters.catalog}}"
               bronze-schema: ${var.bronze_schema}
               ops-schema: ${var.ops_schema}
-              source-table: ${var.source_table}
+              source-table: "{{job.parameters.source_table}}"
         - task_key: release
           depends_on:
             - task_key: detect
@@ -37,10 +46,11 @@ resources:
             package_name: adf_merge
             entry_point: adf-release
             named_parameters:
-              catalog: ${var.catalog}
+              catalog: "{{job.parameters.catalog}}"
               bronze-schema: ${var.bronze_schema}
               ops-schema: ${var.ops_schema}
-              source-table: ${var.source_table}
+              source-table: "{{job.parameters.source_table}}"
+              changefile-table: "{{job.parameters.changefile_table}}"
               use-changefile: "true"
               audit: "true"
               changefile-wait-days: "3"

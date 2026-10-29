@@ -19,7 +19,10 @@ def _parser(description: str) -> argparse.ArgumentParser:
     ap.add_argument("--catalog", required=True)
     ap.add_argument("--bronze-schema", default="bronze")
     ap.add_argument("--ops-schema", default="ops")
-    ap.add_argument("--source-table", default=DEFAULT_SOURCE_TABLE)
+    # Databricks also passes every job parameter to a wheel task as --<name>=<value>, with the underscores of the
+    # job parameter names (source_table, changefile_table), so accept both spellings on both tasks.
+    ap.add_argument("--source-table", "--source_table", dest="source_table", default=DEFAULT_SOURCE_TABLE)
+    ap.add_argument("--changefile-table", "--changefile_table", dest="changefile_table", default=DEFAULT_CHANGEFILE_TABLE)
     return ap
 
 
@@ -36,7 +39,6 @@ def detect_main(argv=None) -> None:
 
 def release_main(argv=None) -> None:
     ap = _parser("Apply every pending adf_usa release in order")
-    ap.add_argument("--changefile-table", default=DEFAULT_CHANGEFILE_TABLE)
     ap.add_argument("--use-changefile", default="true")
     ap.add_argument("--audit", default="true")
     ap.add_argument("--changefile-wait-days", type=int, default=3)

@@ -1,6 +1,6 @@
 """Print the vendor's latest release marker, i.e. what to use as the baseline for a fresh install.
 
-    python3 scripts/latest_release.py --profile DEFAULT [--source-table precisely_product_share.addressing.adf_usa]
+    python3 scripts/latest_release.py --profile DEFAULT [--source-table precisely_product_share.precisely_db_property_graph.adf_usa]
 
 Reads DESCRIBE HISTORY of the share through the Databricks CLI and takes the newest commit that set
 precisely.data.vintage. Prints JSON: release_version, source_version (the pin), row_count, committed_at.
@@ -20,7 +20,7 @@ from adf_merge.detect import parse_vintage_commits  # noqa: E402
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--profile", required=True)
-    ap.add_argument("--source-table", default="precisely_product_share.addressing.adf_usa")
+    ap.add_argument("--source-table", default="precisely_product_share.precisely_db_property_graph.adf_usa")
     a = ap.parse_args()
     out = subprocess.run(
         ["databricks", "experimental", "aitools", "tools", "query", "--profile", a.profile,

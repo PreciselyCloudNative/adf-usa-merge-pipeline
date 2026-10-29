@@ -1,7 +1,7 @@
 """Apply a release from Precisely's changefile (primary path); the hash-diff MERGE is the fallback and the audit.
 
 The changefile (`adf_usa_changefile`) is replaced in full for every release and lists only that release's changes:
-CHANGE = A (added), U (updated), D (deleted). It lands about two days after the main table's release marker, and
+CHANGE = A (added), U (updated), D (deleted). Precisely publishes it the same day as the main table's release marker (it lagged about two days once), and
 carries LATITUDE/LONGITUDE as decimal(11,6), which we cast to double (hash-identical to the main table, checked
 on release 2026.10.2: 12,856 of 12,856 rows).
 
