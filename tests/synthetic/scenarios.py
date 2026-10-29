@@ -9,7 +9,7 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from adf_merge import detect, maintenance, release
+from adf_merge import changefile, detect, maintenance, release
 from adf_merge.hashing import HASH_SPEC_VERSION
 from adf_merge.release import GateError, Params
 from adf_merge.schema import HASH_COLUMNS, SOURCE_COLUMNS
@@ -56,7 +56,8 @@ class Env:
                     spark.sql(stmt)
         self._create_source()
         self.p = Params(catalog=catalog, bronze_schema=self.bronze, ops_schema=self.ops, source_table=self.src,
-                        deleted_tolerance=0)
+                        deleted_tolerance=0, changefile_table=f"{catalog}.{self.src_schema}.adf_usa_changefile",
+                        use_changefile=False)
 
     # ---- source helpers -------------------------------------------------------------------
     @staticmethod
@@ -64,9 +65,9 @@ class Env:
         cols = [f"concat('PB', lpad(cast({id_expr} as string), 7, '0')) AS PBKEY"]
         for name, typ in HASH_COLUMNS:
             if name == "LATITUDE":
-                cols.append(f"cast(30.0 + {id_expr} * 0.001 as double) AS LATITUDE")
+                cols.append(f"cast(cast(30.0 + {id_expr} * 0.001 as decimal(11,6)) as double) AS LATITUDE")
             elif name == "LONGITUDE":
-                cols.append(f"cast(-90.0 - {id_expr} * 0.001 as double) AS LONGITUDE")
+                cols.append(f"cast(cast(-90.0 - {id_expr} * 0.001 as decimal(11,6)) as double) AS LONGITUDE")
             elif name == "UNIT":
                 cols.append(f"CASE WHEN {id_expr} % 3 = 0 THEN NULL ELSE concat('UNIT', {id_expr}) END AS UNIT")
             else:
@@ -124,15 +125,54 @@ class Env:
             VALUES ('{vintage}', 1, 'COMPLETE', {pin}, {N}, {v}, {HASH_SPEC_VERSION})"""
         )
 
-    def label(self, vintage, pin, status="CONFIRMED", added=None, updated=None, deleted=None, rows=None):
+    def label(self, vintage, pin, status="CONFIRMED", added=None, updated=None, deleted=None, rows=None, date=True):
         def lit(x):
             return "NULL" if x is None else x
 
         self.sql(
-            f"""INSERT INTO {self.p.release_label} (release_version, source_delta_version, status, vendor_added,
-            vendor_updated, vendor_deleted, vendor_row_count)
-            VALUES ('{vintage}', {pin}, '{status}', {lit(added)}, {lit(updated)}, {lit(deleted)}, {lit(rows)})"""
+            f"""INSERT INTO {self.p.release_label} (release_version, release_date, source_delta_version, status,
+            vendor_added, vendor_updated, vendor_deleted, vendor_row_count)
+            VALUES ('{vintage}', {"current_date()" if date else "NULL"}, {pin}, '{status}', {lit(added)}, {lit(updated)},
+            {lit(deleted)}, {lit(rows)})"""
         )
+
+    def write_changefile(self, vintage, added=None, updated=None, deleted=None, wrong_city=False, count_delta=0):
+        """Vendor changefile: full replace, decimal(11,6) coordinates. A/U rows carry the new values (read from the
+        main source), D rows the old generated values. Ranges are (lo, hi) id ranges."""
+        def sel(frm, change, code, city=None):
+            cols = []
+            for c in SOURCE_COLUMNS:
+                if c in ("LATITUDE", "LONGITUDE"):
+                    cols.append(f"cast({c} as decimal(11,6)) AS {c}")
+                elif c == "CITY" and city:
+                    cols.append(f"'{city}' AS CITY")
+                else:
+                    cols.append(c)
+            return f"SELECT {', '.join(cols)}, '{change}' AS CHANGE, '{code}' AS CHG_CODE, '' AS PBKEY_ALT FROM {frm}"
+
+        def between(rng):
+            return f"PBKEY BETWEEN '{self.key(rng[0])}' AND '{self.key(rng[1] - 1)}'"
+
+        parts = []
+        if added:
+            parts.append(sel(f"(SELECT * FROM {self.src} WHERE {between(added)})", "A", "NEW"))
+        if updated:
+            parts.append(sel(f"(SELECT * FROM {self.src} WHERE {between(updated)})", "U", "", "WRONG" if wrong_city else None))
+        if deleted:
+            old = f"(SELECT {self.row_select('id')} FROM range({deleted[0]}, {deleted[1]}))"
+            parts.append(sel(old, "D", "BAD"))
+        cf = self.p.changefile_table
+        self.sql(f"CREATE OR REPLACE TABLE {cf} AS " + " UNION ALL ".join(parts))
+        n = self.sql(f"SELECT count(*) FROM {cf}").collect()[0][0]
+        self.sql(f"ALTER TABLE {cf} SET TBLPROPERTIES ('precisely.data.vintage' = '{vintage}', "
+                 f"'precisely.data.count' = '{n + count_delta}')")
+
+    def auto(self, vintage, **kw):
+        return changefile.run_release_auto(self.spark, replace(self.p, release_version=vintage, use_changefile=True, **kw))
+
+    def log_row(self, vintage):
+        return self.sql(f"SELECT method, fallback_reason, audit, state FROM {self.p.release_log} "
+                        f"WHERE release_version = '{vintage}'").collect()[0].asDict()
 
     def run(self, vintage, **kw):
         return release.run_release(self.spark, replace(self.p, release_version=vintage, **kw))
@@ -441,4 +481,131 @@ def s17_silver_views(env: Env):
     eq(tuple(rel), ("2099.01.1", 8, 4, 6), "releases view")
 
 
-SCENARIOS = [v for k, v in sorted(globals().items()) if re.match(r"s\d\d_", k)]
+def _release_via_changefile(env: Env, vintage, *, ins=None, upd=None, dele=None, rows=None, **cf_kw):
+    if ins:
+        env.src_insert(*ins)
+    if upd:
+        env.src_update(upd[0], upd[1], "CITY = 'NEWCITY'")
+    if dele:
+        env.src_delete(*dele)
+    pin = env.mark_release(vintage)
+    n = lambda r: (r[1] - r[0]) if r else 0  # noqa: E731
+    env.label(vintage, pin, added=n(ins), updated=n(upd), deleted=n(dele), rows=rows)
+    env.write_changefile(vintage, added=ins, updated=upd, deleted=dele, **cf_kw)
+    return pin
+
+
+def c01_changefile_primary(env: Env):
+    _release_via_changefile(env, "2099.01.1", ins=(N, N + 20), upd=(0, 10), dele=(100, 105), rows=N + 15)
+    r = env.auto("2099.01.1")
+    eq((r["method"], r["audit"]), ("CHANGEFILE", "PASSED"), "method / audit")
+    eq(r["counts"], {"added": 20, "updated": 10, "deleted": 5, "reappeared": 0}, "counts")
+    eq(env.log_row("2099.01.1"), {"method": "CHANGEFILE", "fallback_reason": None, "audit": "PASSED", "state": "COMPLETE"}, "log")
+    t = env.row(102)
+    check(t["status"] == "DELETED" and t["row_hash"] is None and t["CITY"] is None, "tombstone nulled")
+    eq(env.row(5)["CITY"], "NEWCITY", "update applied")
+    eq(env.current_counts(), {"BASELINE": N - 15, "ADDED": 20, "UPDATED": 10, "DELETED": 5}, "status distribution")
+
+
+def c02_changefile_resurrection(env: Env):
+    _release_via_changefile(env, "2099.01.1", dele=(100, 105))
+    env.auto("2099.01.1")
+    env.sql(f"INSERT INTO {env.src} SELECT {env.row_select('id')} FROM range(100, 105)")
+    pin = env.mark_release("2099.01.2")
+    env.label("2099.01.2", pin, added=5, updated=0, deleted=0)
+    env.write_changefile("2099.01.2", added=(100, 105))
+    r = env.auto("2099.01.2")
+    eq(r["method"], "CHANGEFILE", "method")
+    eq(r["counts"], {"added": 5, "updated": 0, "deleted": 0, "reappeared": 5}, "counts")
+    back = env.row(100)
+    eq((back["status"], back["reappeared"], back["CITY"]), ("ADDED", True, "CITY_100"), "resurrected row")
+
+
+def c03_not_there_yet_defers_then_falls_back(env: Env):
+    env.src_insert(N, N + 5)
+    env.mark_release("2099.01.1")
+    detect.run_detect(env.spark, env.p)
+    env.sql(f"UPDATE {env.p.release_label} SET release_date = current_date() WHERE release_version = '2099.01.1'")
+    before = env.current_version()
+    out = detect.run_pending(env.spark, replace(env.p, use_changefile=True, changefile_wait_days=3))
+    eq([r["result"] for r in out["applied"]], ["deferred"], "deferred while the changefile is missing")
+    eq(env.current_version(), before, "nothing applied")
+    eq(env.log_state("2099.01.1"), None, "no log row")
+    out = detect.run_pending(env.spark, replace(env.p, use_changefile=True, changefile_wait_days=0))
+    r = out["applied"][0]
+    eq(r["result"], "complete", "falls back once the wait is over")
+    row = env.log_row("2099.01.1")
+    eq(row["method"], "MERGE", "method")
+    check("not ready" in row["fallback_reason"], f"reason: {row['fallback_reason']}")
+    eq(r["counts"]["added"], 5, "merge counts")
+
+
+def c04_inconsistent_changefile_falls_back(env: Env):
+    # changefile says "added" for keys that are already live
+    env.src_insert(N, N + 5)
+    pin = env.mark_release("2099.01.1")
+    env.label("2099.01.1", pin, added=5, updated=0, deleted=0, rows=N + 5)
+    env.write_changefile("2099.01.1", added=(N - 3, N + 5))
+    r = env.auto("2099.01.1")
+    row = env.log_row("2099.01.1")
+    eq((row["method"], row["state"]), ("MERGE", "COMPLETE"), "fell back to MERGE")
+    check("precondition" in row["fallback_reason"], f"reason: {row['fallback_reason']}")
+    eq(r["counts"]["added"], 5, "merge result is correct")
+
+
+def c05_audit_catches_wrong_values(env: Env):
+    # changefile U rows carry a value that differs from the main table
+    _release_via_changefile(env, "2099.01.1", upd=(0, 4), wrong_city=True, rows=N)
+    r = env.auto("2099.01.1")
+    row = env.log_row("2099.01.1")
+    eq((row["method"], row["state"]), ("MERGE", "COMPLETE"), "fell back to MERGE")
+    check("failed" in row["fallback_reason"] and "fingerprint" in row["fallback_reason"], f"reason: {row['fallback_reason']}")
+    eq(env.row(1)["CITY"], "NEWCITY", "current matches the main table, not the changefile")
+    eq(env.change_log_counts(2), {"UPDATED": 4}, "change log from the MERGE only")
+    eq(r["counts"]["updated"], 4, "counts")
+
+
+def c06_changefile_count_property_mismatch(env: Env):
+    _release_via_changefile(env, "2099.01.1", ins=(N, N + 3), count_delta=1)
+    env.auto("2099.01.1")
+    row = env.log_row("2099.01.1")
+    eq(row["method"], "MERGE", "fell back")
+    check("precisely.data.count" in row["fallback_reason"], f"reason: {row['fallback_reason']}")
+
+
+def c07_audit_skipped_when_pin_expired(env: Env):
+    _release_via_changefile(env, "2099.01.1", ins=(N, N + 3), upd=(0, 2))
+    real = detect.pin_readable
+    detect.pin_readable = lambda spark, p, pin: False
+    try:
+        r = env.auto("2099.01.1")
+    finally:
+        detect.pin_readable = real
+    eq((r["method"], r["audit"]), ("CHANGEFILE", "SKIPPED"), "applied without audit")
+    eq(env.log_row("2099.01.1")["audit"], "SKIPPED", "log")
+
+
+def c08_changefile_schema_drift(env: Env):
+    _release_via_changefile(env, "2099.01.1", ins=(N, N + 3))
+    env.sql(f"ALTER TABLE {env.p.changefile_table} ADD COLUMN SURPRISE STRING")
+    # the changefile is read at the vendor's release-marker commit, so re-mark the release after the schema change
+    env.sql(f"ALTER TABLE {env.p.changefile_table} SET TBLPROPERTIES ('precisely.data.vintage' = '2099.01.1', 'precisely.data.count' = '3')")
+    env.auto("2099.01.1")
+    row = env.log_row("2099.01.1")
+    eq(row["method"], "MERGE", "fell back")
+    check("schema drift" in row["fallback_reason"], f"reason: {row['fallback_reason']}")
+
+
+def c09_changefile_matches_merge(env: Env):
+    """Same release applied both ways gives the same table."""
+    _release_via_changefile(env, "2099.01.1", ins=(N, N + 12), upd=(20, 30), dele=(500, 507), rows=N + 5)
+    env.auto("2099.01.1")
+    r = env.auto("2099.01.1")
+    eq(r["result"], "noop", "re-run is a no-op")
+    h = release.hashed_source(release.read_source(env.spark, env.p, env.src_version()))
+    # audit already compared the live rows with the main table; here we also confirm the MERGE would change nothing
+    diff = release.diff_preview(env.spark, env.p, h)
+    eq((diff["added"], diff["updated"], diff["deleted"], diff["reappeared"]), (0, 0, 0, 0), "MERGE sees no difference")
+
+
+SCENARIOS = [v for k, v in sorted(globals().items()) if re.match(r"[sc]\d\d_", k)]

@@ -30,7 +30,10 @@ CREATE TABLE IF NOT EXISTS ${catalog}.ops.release_log (
   hash_spec_version     INT,
   started_at            TIMESTAMP,
   finished_at           TIMESTAMP,
-  error                 STRING
+  error                 STRING,
+  method                STRING           COMMENT 'CHANGEFILE or MERGE: how the release was applied',
+  fallback_reason       STRING           COMMENT 'Why the MERGE ran instead of the changefile, NULL otherwise',
+  audit                 STRING           COMMENT 'PASSED (content fingerprint matched the pinned source) or SKIPPED'
 )
 COMMENT 'One row per release run, commit marker and rollback pointer'
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
