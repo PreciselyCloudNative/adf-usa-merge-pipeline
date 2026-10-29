@@ -1,7 +1,8 @@
 # Databricks notebook source
-# One-off bootstrap: load adf_usa_current from the frozen 2026.10.1 baseline and seed the control tables.
+# One-off bootstrap: load adf_usa_current from the frozen baseline table and seed the control tables.
 # Run on serverless via `databricks jobs submit`. Refuses to run if adf_usa_current already has rows.
-# Parameters (notebook base_parameters): catalog, src_path (workspace dir that contains adf_merge/)
+# Parameters (notebook base_parameters), the last four come from scripts/latest_release.py and the baseline CTAS:
+#   catalog, src_path (workspace dir that contains adf_merge/), baseline_table, release_version, source_version, expected_rows
 
 # COMMAND ----------
 
@@ -10,10 +11,15 @@ import sys
 
 dbutils.widgets.text("catalog", "address_book")
 dbutils.widgets.text("src_path", "")
-dbutils.widgets.text("expected_rows", "194466619")
+dbutils.widgets.text("baseline_table", "adf_usa_baseline")
+dbutils.widgets.text("release_version", "")
+dbutils.widgets.text("source_version", "")
+dbutils.widgets.text("expected_rows", "")
 
 catalog = dbutils.widgets.get("catalog")
 src_path = dbutils.widgets.get("src_path")
+RELEASE = dbutils.widgets.get("release_version")
+SOURCE_VERSION = int(dbutils.widgets.get("source_version"))
 expected_rows = int(dbutils.widgets.get("expected_rows"))
 if src_path:
     sys.path.insert(0, src_path)
@@ -23,9 +29,8 @@ from pyspark.sql import functions as F
 from adf_merge.hashing import HASH_SPEC_VERSION, row_hash_expr
 from adf_merge.schema import HASH_COLUMNS, SOURCE_COLUMNS
 
-BASELINE = f"{catalog}.bronze.adf_usa_baseline_2026_10_1"
+BASELINE = f"{catalog}.bronze.{dbutils.widgets.get('baseline_table')}"
 CURRENT = f"{catalog}.bronze.adf_usa_current"
-RELEASE = "2026.10.1"
 RELEASE_SEQ = 1
 
 # COMMAND ----------
@@ -85,15 +90,10 @@ spark.sql(
     f"""
 MERGE INTO {catalog}.ops.release_label t
 USING (
-  SELECT * FROM VALUES
-    ('2026.10.1', DATE'2026-10-23', 219L, 'CONFIRMED', 11738L, 5200L, 23L, 194466619L,
-     'bootstrap: counts from the Precisely release document supplied by the user', current_timestamp(),
-     'Baseline. Source pin v219 = SET TBLPROPERTIES after the v218 MERGE.'),
-    ('2026.10.2', DATE'2026-10-29', 227L, 'CONFIRMED', 9467L, 3389L, 229L, 194475857L,
-     'bootstrap: counts from the Precisely release document supplied by the user', current_timestamp(),
-     'Source pin v227 = SET TBLPROPERTIES after the v226 MERGE. Row count = 194466619+9467-229.')
-  AS s(release_version, release_date, source_delta_version, status, vendor_added, vendor_updated, vendor_deleted,
-       vendor_row_count, confirmed_by, confirmed_at, notes)
+  SELECT '{RELEASE}' AS release_version, CAST(NULL AS DATE) AS release_date, {SOURCE_VERSION}L AS source_delta_version,
+         'CONFIRMED' AS status, CAST(NULL AS BIGINT) AS vendor_added, CAST(NULL AS BIGINT) AS vendor_updated,
+         CAST(NULL AS BIGINT) AS vendor_deleted, {expected_rows}L AS vendor_row_count, 'bootstrap' AS confirmed_by,
+         current_timestamp() AS confirmed_at, 'Baseline. Source pin = the commit that set precisely.data.vintage.' AS notes
 ) s
 ON t.release_version = s.release_version
 WHEN NOT MATCHED THEN INSERT *
@@ -108,7 +108,7 @@ ON t.release_version = s.release_version
 WHEN NOT MATCHED THEN INSERT
   (release_version, release_seq, run_id, state, source_delta_version, source_row_count, added, updated, deleted,
    current_table_version, hash_spec_version, started_at, finished_at, error, method)
-VALUES ('{RELEASE}', {RELEASE_SEQ}, 'bootstrap', 'COMPLETE', 219, {n}, NULL, NULL, NULL,
+VALUES ('{RELEASE}', {RELEASE_SEQ}, 'bootstrap', 'COMPLETE', {SOURCE_VERSION}, {n}, NULL, NULL, NULL,
         NULL, {HASH_SPEC_VERSION}, current_timestamp(), current_timestamp(), NULL, 'BASELINE')
 """
 )
