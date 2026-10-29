@@ -5,7 +5,7 @@ import json
 
 from adf_merge.detect import run_detect, run_pending
 from adf_merge.maintenance import after_releases
-from adf_merge.release import DEFAULT_SOURCE_TABLE, Params, to_json
+from adf_merge.release import DEFAULT_CHANGEFILE_TABLE, DEFAULT_SOURCE_TABLE, Params, to_json
 
 
 def _spark():
@@ -36,6 +36,10 @@ def detect_main(argv=None) -> None:
 
 def release_main(argv=None) -> None:
     ap = _parser("Apply every pending adf_usa release in order")
+    ap.add_argument("--changefile-table", default=DEFAULT_CHANGEFILE_TABLE)
+    ap.add_argument("--use-changefile", default="true")
+    ap.add_argument("--audit", default="true")
+    ap.add_argument("--changefile-wait-days", type=int, default=3)
     ap.add_argument("--require-confirmed", default="false")
     ap.add_argument("--allow-large-change", default="false")
     ap.add_argument("--max-row-count-change-pct", type=float, default=1.0)
@@ -46,6 +50,10 @@ def release_main(argv=None) -> None:
         allow_large_change=a.allow_large_change.lower() == "true",
         max_row_count_change_pct=a.max_row_count_change_pct,
         deleted_tolerance=a.deleted_tolerance,
+        changefile_table=a.changefile_table,
+        use_changefile=a.use_changefile.lower() == "true",
+        audit=a.audit.lower() == "true",
+        changefile_wait_days=a.changefile_wait_days,
     )
     spark = _spark()
     out = run_pending(spark, p, require_confirmed=a.require_confirmed.lower() == "true")

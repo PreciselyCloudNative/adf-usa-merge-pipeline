@@ -41,5 +41,8 @@ resources:
               bronze-schema: ${var.bronze_schema}
               ops-schema: ${var.ops_schema}
               source-table: ${var.source_table}
+              use-changefile: "true"
+              audit: "true"
+              changefile-wait-days: "3"
               require-confirmed: "false"
               allow-large-change: "false"

@@ -12,7 +12,8 @@ import json
 import re
 from dataclasses import replace
 
-from adf_merge.release import GateError, Params, read_source, run_release
+from adf_merge.changefile import run_release_auto
+from adf_merge.release import GateError, Params, read_source
 
 VINTAGE_PROP = "precisely.data.vintage"
 COUNT_PROP = "precisely.data.count"
@@ -190,7 +191,8 @@ def pin_readable(spark, p: Params, pin: int) -> bool:
 
 
 def run_pending(spark, p: Params, require_confirmed: bool = False) -> dict:
-    """Apply every pending release in order, one at a time. Stops (raises) on the first failure.
+    """Apply every pending release in order, one at a time. Stops (raises) on the first failure,
+    or quietly when a release is deferred while its changefile has not arrived.
 
     A pending release whose pinned version has expired (time-travel window) while a LATER release is pending is
     marked SUPERSEDED: the later release diffs against our current state, so no change is lost, it is just
@@ -211,5 +213,8 @@ def run_pending(spark, p: Params, require_confirmed: bool = False) -> dict:
             )
             results.append({"release": version, "result": "superseded"})
             continue
-        results.append(run_release(spark, replace(p, release_version=version)))
+        out = run_release_auto(spark, replace(p, release_version=version))
+        results.append(out)
+        if out["result"] == "deferred":  # later releases must wait for this one
+            break
     return {"applied": results}

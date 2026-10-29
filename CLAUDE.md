@@ -159,3 +159,10 @@ fit via the databricks skills). 3. Only then build.
 - Not pushed. User wants push/PR only after Phase 6 -> awaiting go-ahead.
 ## Changefile (found 2026-10-29)
 `adf_usa_changefile`: full-replace per release (only the latest release's changes, v0 CREATE, v1 CTAS, v2 SET TBLPROPERTIES vintage/count=13085). Columns = adf cols + CHANGE (A/U/D), CHG_CODE (NEW/BAD/DUPLICATE/''), PBKEY_ALT (set for DUPLICATE). LATITUDE/LONGITUDE decimal(11,6) (not double). D rows carry full attributes. Plan: changefile primary, MERGE fallback + audit (design pending user approval).
+
+## Changefile primary (branch feat/changefile-primary, 2026-10-29)
+- User decisions: grants to `account users` (done: USE CATALOG on address_book, USE SCHEMA + SELECT on silver); push + PR #1 (done, base main = empty initial commit); changefile primary with MERGE fallback + audit; cast decimal(11,6) coordinates to double (verified hash-identical for 12,856/12,856 rows of 2026.10.2).
+- `changefile.py`: per release -> changefile at the release vintage? gates (schema, unique keys, A/U/D, row count == its count property) + preconditions vs current (A not live, U/D live, live rows after == vendor_row_count) -> one MERGE by key (D tombstone, A insert/resurrect, U only when hash differs) -> change log -> validate (counts == changefile counts, vendor doc counts, live rows) + audit (content fingerprint vs the pinned main table when the pin is readable, else audit SKIPPED).
+- Any failure after apply -> `rollback_release` -> hash-diff MERGE (method MERGE, fallback_reason recorded). Changefile missing/older than the release: DEFER (no error, later releases wait) for up to `changefile_wait_days` (3) after label release_date, then MERGE. The changefile lands ~2 days after the main-table marker.
+- release_log gained `method` (BASELINE/MERGE/CHANGEFILE), `fallback_reason`, `audit`; migration in sql/migrations/001 applied live. Job params: use-changefile, audit, changefile-wait-days.
+- Synthetic suite: 26 scenarios (9 new c01-c09) all pass. The changefile keeps only the latest release, so a missed release must use MERGE (automatic).

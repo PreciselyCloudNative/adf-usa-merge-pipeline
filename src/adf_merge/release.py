@@ -19,6 +19,7 @@ from adf_merge.hashing import HASH_SPEC_VERSION, row_hash_expr
 from adf_merge.schema import HASH_COLUMNS, KEY_COLUMN, SOURCE_COLUMNS
 
 DEFAULT_SOURCE_TABLE = "precisely_product_share.addressing.adf_usa"
+DEFAULT_CHANGEFILE_TABLE = "precisely_product_share.precisely_db_property_graph.adf_usa_changefile"
 ATTR_COLUMNS = [c for c in SOURCE_COLUMNS if c != KEY_COLUMN]
 EXPECTED_TYPES = {KEY_COLUMN: "string", **{n: t for n, t in HASH_COLUMNS}}
 
@@ -41,6 +42,12 @@ class Params:
     deleted_tolerance: int = 50
     max_row_count_change_pct: float = 1.0
     allow_large_change: bool = False
+    changefile_table: str = DEFAULT_CHANGEFILE_TABLE
+    use_changefile: bool = True
+    audit: bool = True
+    changefile_wait_days: int = 3
+    method: str = "MERGE"
+    fallback_reason: str | None = None
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
     @property
@@ -84,44 +91,47 @@ def row_count_change_pct(source_rows: int, current_live_rows: int) -> float:
     return abs(source_rows - current_live_rows) * 100.0 / current_live_rows
 
 
-def merge_sql(p: Params, release_seq: int, view: str = "adf_src_h") -> str:
-    """The single atomic MERGE. Unchanged rows match no clause, so they are never rewritten.
-
-    Target columns in SET are unqualified (standard Delta MERGE syntax), source values use alias s.
-    """
+def merge_parts(p: Params, release_seq: int) -> dict:
+    """SQL fragments shared by the hash-diff MERGE and the changefile MERGE."""
     stamp = (
         f"release_version = '{p.release_version}', release_seq = {release_seq}, "
         f"changed_at = current_timestamp(), hash_spec_version = {HASH_SPEC_VERSION}"
     )
-    set_attrs = ", ".join(f"{c} = s.{c}" for c in ATTR_COLUMNS)
-    null_attrs = ", ".join(f"{c} = NULL" for c in ATTR_COLUMNS)
     insert_cols = ", ".join(
         SOURCE_COLUMNS
         + ["row_hash", "hash_spec_version", "status", "release_version", "release_seq", "changed_at", "reappeared"]
     )
     insert_vals = ", ".join(
         [f"s.{c}" for c in SOURCE_COLUMNS]
-        + [
-            "s.row_hash",
-            str(HASH_SPEC_VERSION),
-            "'ADDED'",
-            f"'{p.release_version}'",
-            str(release_seq),
-            "current_timestamp()",
-            "false",
-        ]
+        + ["s.row_hash", str(HASH_SPEC_VERSION), "'ADDED'", f"'{p.release_version}'", str(release_seq),
+           "current_timestamp()", "false"]
     )
+    return {
+        "stamp": stamp,
+        "set_attrs": ", ".join(f"{c} = s.{c}" for c in ATTR_COLUMNS),
+        "null_attrs": ", ".join(f"{c} = NULL" for c in ATTR_COLUMNS),
+        "insert_cols": insert_cols,
+        "insert_vals": insert_vals,
+    }
+
+
+def merge_sql(p: Params, release_seq: int, view: str = "adf_src_h") -> str:
+    """The single atomic MERGE. Unchanged rows match no clause, so they are never rewritten.
+
+    Target columns in SET are unqualified (standard Delta MERGE syntax), source values use alias s.
+    """
+    m = merge_parts(p, release_seq)
     return f"""
 MERGE INTO {p.current} t
 USING {view} s
 ON t.{KEY_COLUMN} = s.{KEY_COLUMN}
 WHEN MATCHED AND t.status = 'DELETED' THEN UPDATE SET
-  {set_attrs}, row_hash = s.row_hash, status = 'ADDED', reappeared = true, {stamp}
+  {m['set_attrs']}, row_hash = s.row_hash, status = 'ADDED', reappeared = true, {m['stamp']}
 WHEN MATCHED AND t.row_hash <> s.row_hash THEN UPDATE SET
-  {set_attrs}, row_hash = s.row_hash, status = 'UPDATED', reappeared = false, {stamp}
-WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})
+  {m['set_attrs']}, row_hash = s.row_hash, status = 'UPDATED', reappeared = false, {m['stamp']}
+WHEN NOT MATCHED THEN INSERT ({m['insert_cols']}) VALUES ({m['insert_vals']})
 WHEN NOT MATCHED BY SOURCE AND t.status <> 'DELETED' THEN UPDATE SET
-  {null_attrs}, row_hash = NULL, status = 'DELETED', reappeared = false, {stamp}
+  {m['null_attrs']}, row_hash = NULL, status = 'DELETED', reappeared = false, {m['stamp']}
 """
 
 
@@ -283,7 +293,8 @@ def fingerprint(df):
     return r["n"], r["fp"]
 
 
-def validate(spark, p: Params, seq: int, label: dict, src_h) -> dict:
+def validate(spark, p: Params, seq: int, label: dict, src_h=None) -> dict:
+    """Counts vs expectations; with src_h also row count + content fingerprint vs the pinned source."""
     counts = release_counts(spark, p, seq)
     expected = {
         "added": p.expect_added if p.expect_added is not None else label.get("vendor_added"),
@@ -293,9 +304,10 @@ def validate(spark, p: Params, seq: int, label: dict, src_h) -> dict:
     problems = check_counts(counts, expected, p.deleted_tolerance)
     live = spark.table(p.current).filter("status <> 'DELETED'")
     cur_fp = fingerprint(live)
-    src_fp = fingerprint(src_h)
-    if cur_fp != src_fp:
-        problems.append(f"current != pinned source (rows/fingerprint): {cur_fp} vs {src_fp}")
+    if src_h is not None:
+        src_fp = fingerprint(src_h)
+        if cur_fp != src_fp:
+            problems.append(f"current != pinned source (rows/fingerprint): {cur_fp} vs {src_fp}")
     return {"counts": counts, "expected": expected, "problems": problems, "row_count": cur_fp[0]}
 
 
@@ -362,7 +374,7 @@ def run_release(spark, p: Params) -> dict:
             raise RuntimeError("validation failed: " + "; ".join(v["problems"]))
         c = v["counts"]
         _log_update(spark, p, state="COMPLETE", added=c["added"], updated=c["updated"], deleted=c["deleted"],
-                    finished_at=True)
+                    method=p.method, fallback_reason=p.fallback_reason, audit="PASSED", finished_at=True)
         return {"release": p.release_version, "result": "complete", "release_seq": seq, "pin": pin, "gates": gates,
                 "counts": c, "expected": v["expected"], "row_count": v["row_count"], **applied}
     except Exception as e:  # record, then re-raise
