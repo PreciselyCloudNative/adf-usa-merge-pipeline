@@ -1,0 +1,45 @@
+resources:
+  jobs:
+    adf_usa_release:
+      name: adf-usa-release
+      description: Poll the vendor share for a new adf_usa release, then MERGE each pending release into adf_usa_current.
+      max_concurrent_runs: 1
+      performance_target: STANDARD
+      schedule:
+        quartz_cron_expression: "0 30 6 * * ?"
+        timezone_id: UTC
+        pause_status: PAUSED   # shadow-run manually first, then unpause
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+      environments:
+        - environment_key: default
+          spec:
+            client: "4"
+            dependencies:
+              - ../dist/*.whl
+      tasks:
+        - task_key: detect
+          environment_key: default
+          python_wheel_task:
+            package_name: adf_merge
+            entry_point: adf-detect
+            named_parameters:
+              catalog: ${var.catalog}
+              bronze-schema: ${var.bronze_schema}
+              ops-schema: ${var.ops_schema}
+              source-table: ${var.source_table}
+        - task_key: release
+          depends_on:
+            - task_key: detect
+          environment_key: default
+          python_wheel_task:
+            package_name: adf_merge
+            entry_point: adf-release
+            named_parameters:
+              catalog: ${var.catalog}
+              bronze-schema: ${var.bronze_schema}
+              ops-schema: ${var.ops_schema}
+              source-table: ${var.source_table}
+              require-confirmed: "false"
+              allow-large-change: "false"

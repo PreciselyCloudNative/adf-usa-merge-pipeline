@@ -1,0 +1,3 @@
+-- Run once per consumer principal (group preferred). Consumers get silver only.
+-- GRANT USE CATALOG ON CATALOG ${catalog} TO `<group>`;
+-- GRANT USE SCHEMA, SELECT ON SCHEMA ${catalog}.silver TO `<group>`;
