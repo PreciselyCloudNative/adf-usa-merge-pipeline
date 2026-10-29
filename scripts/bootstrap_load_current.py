@@ -89,9 +89,9 @@ USING (
     ('2026.10.1', DATE'2026-10-23', 219L, 'CONFIRMED', 11738L, 5200L, 23L, 194466619L,
      'bootstrap: counts from the Precisely release document supplied by the user', current_timestamp(),
      'Baseline. Source pin v219 = SET TBLPROPERTIES after the v218 MERGE.'),
-    ('2026.10.2', CAST(NULL AS DATE), 227L, 'PROPOSED', CAST(NULL AS BIGINT), CAST(NULL AS BIGINT), CAST(NULL AS BIGINT), 194475857L,
-     CAST(NULL AS STRING), CAST(NULL AS TIMESTAMP),
-     'Doc numbers due 2026-10-30. Source pin v227 = SET TBLPROPERTIES after the v226 MERGE. Row count derived (194466619+9467-229).')
+    ('2026.10.2', DATE'2026-10-29', 227L, 'CONFIRMED', 9467L, 3389L, 229L, 194475857L,
+     'bootstrap: counts from the Precisely release document supplied by the user', current_timestamp(),
+     'Source pin v227 = SET TBLPROPERTIES after the v226 MERGE. Row count = 194466619+9467-229.')
   AS s(release_version, release_date, source_delta_version, status, vendor_added, vendor_updated, vendor_deleted,
        vendor_row_count, confirmed_by, confirmed_at, notes)
 ) s
