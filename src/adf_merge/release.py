@@ -30,7 +30,9 @@ class GateError(RuntimeError):
 @dataclass
 class Params:
     catalog: str
-    release_version: str
+    release_version: str = ""
+    bronze_schema: str = "bronze"
+    ops_schema: str = "ops"
     dry_run: bool = False
     source_table: str = DEFAULT_SOURCE_TABLE
     expect_added: int | None = None
@@ -43,19 +45,19 @@ class Params:
 
     @property
     def current(self):
-        return f"{self.catalog}.bronze.adf_usa_current"
+        return f"{self.catalog}.{self.bronze_schema}.adf_usa_current"
 
     @property
     def change_log(self):
-        return f"{self.catalog}.bronze.adf_usa_change_log"
+        return f"{self.catalog}.{self.bronze_schema}.adf_usa_change_log"
 
     @property
     def release_label(self):
-        return f"{self.catalog}.ops.release_label"
+        return f"{self.catalog}.{self.ops_schema}.release_label"
 
     @property
     def release_log(self):
-        return f"{self.catalog}.ops.release_log"
+        return f"{self.catalog}.{self.ops_schema}.release_log"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -295,6 +297,32 @@ def validate(spark, p: Params, seq: int, label: dict, src_h) -> dict:
     if cur_fp != src_fp:
         problems.append(f"current != pinned source (rows/fingerprint): {cur_fp} vs {src_fp}")
     return {"counts": counts, "expected": expected, "problems": problems, "row_count": cur_fp[0]}
+
+
+def rollback_release(spark, p: Params) -> dict:
+    """Undo the newest release: RESTORE current to the previous release's pointer, drop its change-log rows.
+
+    Only the newest release can be rolled back. The release_log row is kept as ROLLED_BACK (audit) and the
+    release can then be re-run.
+    """
+    log = sorted((r.asDict() for r in spark.table(p.release_log).collect()), key=lambda r: r["release_seq"])
+    target = next((r for r in log if r["release_version"] == p.release_version), None)
+    if not target:
+        raise GateError(f"release {p.release_version} not in {p.release_log}")
+    if target["release_seq"] != log[-1]["release_seq"]:
+        raise GateError(f"{p.release_version} is not the newest release; only the newest can be rolled back")
+    seq = target["release_seq"]
+    prev = next((r for r in reversed(log) if r["release_seq"] == seq - 1 and r["state"] == "COMPLETE"), None)
+    if not prev or prev["current_table_version"] is None:
+        raise GateError(f"no rollback pointer: release_seq {seq - 1} is missing or has no current_table_version")
+    restored = False
+    if spark.table(p.current).filter(f"release_seq >= {seq}").limit(1).count():
+        spark.sql(f"RESTORE TABLE {p.current} TO VERSION AS OF {prev['current_table_version']}")
+        restored = True
+    spark.sql(f"DELETE FROM {p.change_log} WHERE release_seq >= {seq}")
+    _log_update(spark, p, state="ROLLED_BACK", current_table_version=None, finished_at=True)
+    return {"release": p.release_version, "result": "rolled_back", "restored_to": prev["current_table_version"],
+            "restored": restored}
 
 
 def run_release(spark, p: Params) -> dict:

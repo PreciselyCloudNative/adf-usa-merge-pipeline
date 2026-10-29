@@ -7,3 +7,5 @@ metastore_db/
 derby.log
 .databricks/
 .DS_Store
+dist/
+build/

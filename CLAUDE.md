@@ -141,3 +141,11 @@ Note: v204 time-travel window closes ~2026-10-29; run it soon or skip.
 ## Process agreed with the user
 1. Design only until approvals. 2. Review the final design with agents (proposed: one design-review agent for correctness/edge cases, one for Databricks implementation
 fit via the databricks skills). 3. Only then build.
+
+## Phase 5 DONE 2026-10-28
+- Added `detect.py` (poll vendor `SET TBLPROPERTIES` release commits via DESCRIBE HISTORY, seed PROPOSED labels, apply pending releases in order, SUPERSEDE expired pins), `cli.py` entry points `adf-detect` / `adf-release`, `rollback_release()` in release.py (RESTORE to previous release pointer, clears change log, state ROLLED_BACK), Params `bronze_schema`/`ops_schema`.
+- Trigger = scheduled poll (Delta Sharing cannot push). Vendor sets vintage property after its MERGE, so a new vintage = finished release; pin = that commit. History before the newest tracked pin is ignored (older vintages are unpadded/out of order, e.g. 2026.9.0, 2026.6.25).
+- DAB: `databricks.yml` + `resources/adf_usa_release.job.yml`, deployed to `/Workspace/Users/mayank.kasturia@precisely.com/.bundle/adf-usa-merge-pipeline`; job `adf-usa-release` (detect -> release), serverless STANDARD, schedule 06:30 UTC **PAUSED**, failure email. `require-confirmed=false` (PROPOSED labels apply automatically, gated by row count / schema / fingerprint).
+- Synthetic suite `tests/synthetic/scenarios.py` (run via `scripts/run_synthetic.py` on Databricks, throwaway schemas): 15 scenarios pass (normal, resurrection, hash sensitivity, rebuild, large-change gate, schema drift, bad data, vendor count, validation failure + rollback, idempotent rerun, crash recovery, detect + Thursday delete, missed releases, expired pin, detect anomalies). Local tests: 25 pass.
+- Shadow run of the deployed job on the real share: detect seeded nothing, release applied nothing (2026.10.2 already COMPLETE).
+- Remaining: shadow-run through the next real release (2026.11.0 / next weekly), then unpause the schedule; Phase 6 (silver views, grants, drop baseline by 2026-11-11, purge/VACUUM); confirm 2026.10.2 label vs Precisely doc on 10-30; push/PR only after Phase 6.

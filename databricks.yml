@@ -1,0 +1,31 @@
+bundle:
+  name: adf-usa-merge-pipeline
+
+include:
+  - resources/*.yml
+
+artifacts:
+  adf_merge_wheel:
+    type: whl
+    build: python3 -m build --wheel
+    path: .
+
+variables:
+  catalog:
+    default: address_book
+  bronze_schema:
+    default: bronze
+  ops_schema:
+    default: ops
+  source_table:
+    default: precisely_product_share.addressing.adf_usa
+  alert_email:
+    default: mayank.kasturia@precisely.com
+
+targets:
+  prod:
+    default: true
+    mode: production
+    workspace:
+      host: https://partner-precisely-presales-us-east-2.cloud.databricks.com
+      root_path: /Workspace/Users/mayank.kasturia@precisely.com/.bundle/${bundle.name}

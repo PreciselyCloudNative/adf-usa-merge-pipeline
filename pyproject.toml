@@ -12,6 +12,10 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8", "pyspark>=4.0", "pandas", "pyarrow"]
 
+[project.scripts]
+adf-detect = "adf_merge.cli:detect_main"
+adf-release = "adf_merge.cli:release_main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
