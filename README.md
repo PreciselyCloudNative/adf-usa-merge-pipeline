@@ -7,22 +7,9 @@ downstream jobs only reprocess the change set.
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    V[("Precisely share<br/>adf_usa (main table)")] -->|"daily poll: new precisely.data.vintage?"| D["adf-detect<br/>seeds a PROPOSED release label + source pin"]
-    D --> R{"adf-release<br/>pending release, in order"}
-    CF[("adf_usa_changefile<br/>CHANGE = A / U / D<br/>lands ~2 days after the main table")] --> G
-    R --> G{"Changefile at this release<br/>and consistent with our table?"}
-    G -- "yes: PRIMARY" --> A["Apply changefile<br/>one MERGE by PBKEY<br/>method = CHANGEFILE"]
-    G -- "not there yet (< 3 days)" --> W["Wait: job retries on the next run"]
-    G -- "no / failed gate / missed release: FALLBACK" --> M["Hash-diff MERGE<br/>vendor main table pinned at the release commit<br/>method = MERGE"]
-    A --> AU{"Validate and audit<br/>counts vs changefile + vendor document<br/>fingerprint vs pinned main table"}
-    AU -- "pass" --> OK
-    AU -- "fail" --> RB["Roll back the release"] --> M
-    M --> OK[("bronze.adf_usa_current<br/>+ change_log, ops.release_log")]
-    OK --> S["silver views for consumers<br/>current, change_feed, releases"]
-    OK --> MT["REORG PURGE after deletes, VACUUM"]
-```
+![Architecture: changefile as the primary path, hash-diff MERGE as the fallback](docs/architecture.png)
+
+Source: `docs/architecture.excalidraw` (open it at excalidraw.com to edit, then export the PNG).
 
 * **Primary path: the changefile** (`precisely_product_share.precisely_db_property_graph.adf_usa_changefile`, rows with
   `CHANGE` = A/U/D). Precisely now publishes it the same day as the main table's release marker; it holds only the latest release.
