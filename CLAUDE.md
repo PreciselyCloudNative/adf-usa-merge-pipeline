@@ -4,6 +4,10 @@
 - Design agreed in conversation on 2026-10-28. No pipeline code or jobs exist yet.
 - **Created 2026-10-28 (user said "go")**: schemas `address_book.bronze` and `address_book.ops`; table `address_book.bronze.adf_usa_baseline_2026_10_1`
   (CTAS of source VERSION AS OF 219; verified 194,466,619 rows, 194,466,619 distinct PBKEY, 0 null PBKEY, 32 cols; props release_version=2026.10.1, retention.drop_by=2026-11-11). Nothing else exists yet.
+- **Phase 1+2 DONE 2026-10-28 (STOP 1 reached)**: created `ops.release_label`, `ops.release_log`, `bronze.adf_usa_current`, `bronze.adf_usa_change_log` from repo DDL; loaded `adf_usa_current` from the baseline via serverless
+  run (194,466,619 rows, all PBKEY and row_hash distinct, 0 null hash, status BASELINE, release 2026.10.1, seq 1). Seeded release_label (10.1 CONFIRMED v219; 10.2 PROPOSED v227) and release_log (10.1 COMPLETE).
+- Repo: https://github.com/PreciselyCloudNative/adf-usa-merge-pipeline (private, EMPTY, nothing pushed). Local repo: `adf-usa-merge-pipeline/`, branch `feat/bootstrap-ddl-and-hash`. Run identity = the user. No dev catalog.
+- Next: STOP 1 review -> Phase 4 manual 2026.10.2 merge (wait for the doc on 2026-10-30; source v227 readable until ~11-04).
 - Next step: get explicit approval on the "Open decisions" below, then review the design with agents, then build.
 - Do NOT create Databricks jobs/tables or write pipeline code until the user approves.
 
