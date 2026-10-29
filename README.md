@@ -74,7 +74,7 @@ databricks bundle deploy -t prod --profile DEFAULT
 ```
 
 This creates the job `adf-usa-release` (tasks `adf-detect` -> `adf-release`, serverless, schedule **PAUSED**) and syncs the
-repo to `/Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/prod/files`. Catalog and schema names are bundle variables
+repo to `/Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/files`. Catalog and schema names are bundle variables
 in `databricks.yml` (`--var catalog=...` to override).
 
 ### 4. Create the schemas and tables
@@ -106,7 +106,7 @@ seeds `ops.release_label` (2026.10.1 and 2026.10.2 with the document counts) and
 It refuses to run twice.
 
 ```bash
-ROOT=/Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/prod/files
+ROOT=/Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/files
 databricks workspace import $ROOT/scripts/bootstrap_load_current --file scripts/bootstrap_load_current.py \
   --format SOURCE --language PYTHON --overwrite --profile DEFAULT
 cat > /tmp/bootstrap.json <<JSON

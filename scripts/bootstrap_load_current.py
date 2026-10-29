@@ -107,9 +107,9 @@ USING (SELECT '{RELEASE}' AS release_version) s
 ON t.release_version = s.release_version
 WHEN NOT MATCHED THEN INSERT
   (release_version, release_seq, run_id, state, source_delta_version, source_row_count, added, updated, deleted,
-   current_table_version, hash_spec_version, started_at, finished_at, error)
+   current_table_version, hash_spec_version, started_at, finished_at, error, method)
 VALUES ('{RELEASE}', {RELEASE_SEQ}, 'bootstrap', 'COMPLETE', 219, {n}, NULL, NULL, NULL,
-        NULL, {HASH_SPEC_VERSION}, current_timestamp(), current_timestamp(), NULL)
+        NULL, {HASH_SPEC_VERSION}, current_timestamp(), current_timestamp(), NULL, 'BASELINE')
 """
 )
 
