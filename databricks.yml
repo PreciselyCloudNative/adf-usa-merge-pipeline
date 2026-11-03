@@ -7,7 +7,7 @@ include:
 artifacts:
   adf_merge_wheel:
     type: whl
-    build: python3 -m build --wheel
+    build: python -m build --wheel
     path: .
 
 variables:
@@ -29,5 +29,6 @@ targets:
     default: true
     mode: production
     workspace:
-      host: https://partner-precisely-presales-us-east-2.cloud.databricks.com
-      root_path: /Workspace/Users/mayank.kasturia@precisely.com/.bundle/${bundle.name}
+      # host is intentionally not set: it comes from the --profile you pass
+      # (or DATABRICKS_HOST), so the same bundle deploys to any workspace.
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}
