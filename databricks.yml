@@ -29,6 +29,6 @@ targets:
     default: true
     mode: production
     workspace:
-      # host is intentionally not set: it comes from the --profile you pass
-      # (or DATABRICKS_HOST), so the same bundle deploys to any workspace.
-      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}
+      # If host is not set: it comes from the --profile you pass
+      host: https://partner-precisely-presales-us-east-2.cloud.databricks.com  # (or DATABRICKS_HOST), so the same bundle deploys to any workspace.
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name} # /Workspace/Users/<user_name@precisely.com>/.bundle/${bundle.name}
