@@ -39,7 +39,7 @@ Consumers get `USE CATALOG` on the catalog and `USE SCHEMA`, `SELECT` on `silver
 
 * Databricks CLI >= 1.18 (use the latest; v0.295.0 fails deploys with `openpgp: key expired`), see
   [Install or update the Databricks CLI](#install-or-update-the-databricks-cli) below
-* An authenticated profile for your workspace (examples use `DEFAULT`; check with `databricks auth profiles`)
+* An authenticated profile for your workspace (replace `<profile>` in the commands below with its name; list yours with `databricks auth profiles`)
 * Python 3.10+ with `build`, installed **inside `.venv`** (not the global Python), for the wheel that the bundle builds
 * `gh` and `git` for the GitHub side
 * Permission to create schemas in the catalog and read the shared catalogs `precisely_product_share.*`
@@ -71,14 +71,13 @@ The bundle does not pin a workspace host. It deploys to whichever workspace the 
 
 ## Step by step: push to Databricks and run end to end
 
-All commands run from the repo root. Replace `DEFAULT` and `address_book` if yours differ.
+All commands run from the repo root. Replace `<profile>` with your profile name (from `databricks auth profiles`) and `address_book` if your catalog differs.
 
 **Shell:** the `bash` blocks work as written on macOS/Linux (bash or zsh) and on Windows in **Git Bash** (installed
-with Git). Steps 5, 6 and 7 also have a **Windows (Command Prompt)** version, because the bash syntax there
-(multi-line strings, heredoc, `$ROOT`, `/tmp`, backslash escapes) does not work in `cmd.exe`. Windows PowerShell treats
-quotes and backticks differently again; use Git Bash or Command Prompt for these steps. Keep the venv active so
-`python` is the venv's Python (`source .venv/bin/activate` on macOS/Linux, `source .venv/Scripts/activate` in Git Bash,
-`.venv\Scripts\activate` in Command Prompt).
+with Git). Steps 5, 6 and 7 also have a **Windows PowerShell** version, because the bash syntax there
+(`$(...)`, heredoc, `/tmp`, backslash escapes) does not work in PowerShell. Use PowerShell, not `cmd.exe`, on Windows.
+Keep the venv active so `python` is the venv's Python (`source .venv/bin/activate` on macOS/Linux,
+`source .venv/Scripts/activate` in Git Bash, `.venv\Scripts\Activate.ps1` in PowerShell).
 
 ### 1. Get the code from GitHub main
 
@@ -98,7 +97,7 @@ macOS / Linux:
 .venv/bin/python -m pytest tests -q
 ```
 
-Windows (Command Prompt or PowerShell):
+Windows (PowerShell):
 
 ```powershell
 .venv\Scripts\python.exe -m pip install -e ".[dev]" build
@@ -112,12 +111,12 @@ Windows (Command Prompt or PowerShell):
 
 Activate the venv first so the bundle's `python -m build --wheel` finds the `build` package
 (`source .venv/bin/activate` on macOS/Linux, `source .venv/Scripts/activate` in Windows Git Bash,
-`.venv\Scripts\activate` in Windows Command Prompt or PowerShell). If the deploy fails with `python: command not found`
+`.venv\Scripts\Activate.ps1` in Windows PowerShell). If the deploy fails with `python: command not found`
 (common on macOS, which only ships `python3`) or `No module named build`, the venv is not active: activate it and retry. Then:
 
 ```bash
-databricks bundle validate --strict -t prod --profile DEFAULT
-databricks bundle deploy -t prod --profile DEFAULT
+databricks bundle validate --strict -t prod --profile <profile>
+databricks bundle deploy -t prod --profile <profile>
 ```
 
 This creates the job `adf-usa-release` (tasks `adf-detect` -> `adf-release`, serverless, daily schedule) and syncs the
@@ -127,112 +126,112 @@ in `databricks.yml` (`--var catalog=...` to override).
 ### 4. Create the schemas and tables
 
 ```bash
-python scripts/apply_ddl.py --profile DEFAULT --catalog address_book
+python scripts/apply_ddl.py --profile <profile> --catalog address_book
 ```
 
 Creates `bronze`, `ops` and `silver` plus all tables and views from `sql/ddl/`. Safe to re-run.
 
 ### 5. Pick the baseline release and freeze it
 
-A fresh install starts from whatever release Precisely has published **now**. Ask the share which one that is:
+A fresh install starts from whatever release Precisely has published **now**. `scripts/latest_release.py` asks the share
+which one that is and prints JSON (`{"release_version": "<X.Y.Z>", "source_version": <N>, "row_count": <rows>, "committed_at": "..."}`).
+The commands below read `release_version` and `source_version` from that JSON and copy that version of the main table
+into `adf_usa_baseline`, so there is nothing to copy and paste. The share keeps only about 7 days of history, so do this
+right away. Replace `<profile>` in both commands. They also print the three values that step 6 needs.
+
+Git Bash / macOS / Linux:
 
 ```bash
-python scripts/latest_release.py --profile DEFAULT
-# {"release_version": "<X.Y.Z>", "source_version": <N>, "row_count": <rows>, "committed_at": "..."}
+J=$(python scripts/latest_release.py --profile <profile>)
+REL=$(python -c "import sys,json; print(json.loads(sys.argv[1])['release_version'])" "$J")
+VER=$(python -c "import sys,json; print(json.loads(sys.argv[1])['source_version'])" "$J")
+ROWS=$(python -c "import sys,json; print(json.loads(sys.argv[1])['row_count'])" "$J")
+
+databricks experimental aitools tools query --profile <profile> "CREATE TABLE address_book.bronze.adf_usa_baseline TBLPROPERTIES ('release_version' = '$REL') AS SELECT * FROM precisely_product_share.precisely_db_property_graph.adf_usa VERSION AS OF $VER"
+echo "release_version=$REL source_version=$VER expected_rows=$ROWS"
 ```
 
-Then copy that version of the main table. The share keeps only about 7 days of history, so do this right away:
+Windows PowerShell:
 
-```bash
-databricks experimental aitools tools query --profile DEFAULT "
-CREATE TABLE address_book.bronze.adf_usa_baseline
-TBLPROPERTIES ('release_version' = '<release_version>')
-AS SELECT * FROM precisely_product_share.precisely_db_property_graph.adf_usa VERSION AS OF <source_version>"
-```
+```powershell
+$r = python scripts/latest_release.py --profile <profile> | ConvertFrom-Json
 
-Windows (Command Prompt): the same statement on one line, because a multi-line string does not paste or run in `cmd`:
-
-```bat
-databricks experimental aitools tools query --profile DEFAULT "CREATE TABLE address_book.bronze.adf_usa_baseline TBLPROPERTIES ('release_version' = '<release_version>') AS SELECT * FROM precisely_product_share.precisely_db_property_graph.adf_usa VERSION AS OF <source_version>"
+databricks experimental aitools tools query --profile <profile> "CREATE TABLE address_book.bronze.adf_usa_baseline TBLPROPERTIES ('release_version' = '$($r.release_version)') AS SELECT * FROM precisely_product_share.precisely_db_property_graph.adf_usa VERSION AS OF $($r.source_version)"
+"release_version=$($r.release_version) source_version=$($r.source_version) expected_rows=$($r.row_count)"
 ```
 
 The row count must equal `row_count` from the previous command (the bootstrap checks it). Check it with
-`databricks experimental aitools tools query --profile DEFAULT "SELECT count(*) FROM address_book.bronze.adf_usa_baseline"`.
+`databricks experimental aitools tools query --profile <profile> "SELECT count(*) FROM address_book.bronze.adf_usa_baseline"`.
 
 ### 6. Load `adf_usa_current` from the baseline and seed the labels
 
 `scripts/bootstrap_load_current.py` is a notebook. It hashes the baseline into `adf_usa_current` (status BASELINE, seq 1),
 seeds `ops.release_label` with the baseline release and writes the baseline row of `ops.release_log`.
-It refuses to run twice. Use the three values from step 5:
+It refuses to run twice. The three values (`release_version`, `source_version`, `row_count`) come from the shell
+variables that step 5 set (`$REL`, `$VER`, `$ROWS` in bash, `$r` in PowerShell), so **run this step in the same terminal
+as step 5**. If you opened a new terminal, do not re-run `latest_release.py`: the share may have published a newer
+release since the baseline was frozen. Set the variables by hand from the values step 5 printed instead
+(for example `REL=2026.10.2 VER=213 ROWS=194475857`, or `$r = @{release_version="2026.10.2"; source_version=213; row_count=194475857}`).
 
 ```bash
 ROOT=/Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/files
 databricks workspace import $ROOT/scripts/bootstrap_load_current --file scripts/bootstrap_load_current.py \
-  --format SOURCE --language PYTHON --overwrite --profile DEFAULT
+  --format SOURCE --language PYTHON --overwrite --profile <profile>
 cat > /tmp/bootstrap.json <<JSON
 {"run_name": "adf-bootstrap",
  "tasks": [{"task_key": "main",
    "notebook_task": {"notebook_path": "$ROOT/scripts/bootstrap_load_current",
                      "base_parameters": {"catalog": "address_book", "src_path": "$ROOT/src",
                                          "baseline_table": "adf_usa_baseline",
-                                         "release_version": "<release_version>",
-                                         "source_version": "<source_version>",
-                                         "expected_rows": "<row_count>"}},
+                                         "release_version": "$REL",
+                                         "source_version": "$VER",
+                                         "expected_rows": "$ROWS"}},
    "environment_key": "e"}],
  "environments": [{"environment_key": "e", "spec": {"client": "4"}}]}
 JSON
-databricks jobs submit --json @/tmp/bootstrap.json --profile DEFAULT
+databricks jobs submit --json @/tmp/bootstrap.json --profile <profile>
 ```
 
-Windows (Command Prompt): `cmd` has no heredoc, so create the job file in Notepad.
+Windows PowerShell (replace `<you>` and `<profile>`). The closing `"@` must stay at the start of its line. The job file is
+written without a BOM, to your temp folder (like `/tmp` in the bash version), so nothing is left in the repo. The
+`@` path is inside double quotes because PowerShell treats a bare `@` as splatting:
 
-1. Import the notebook (replace `<you>`):
+```powershell
+$ROOT = "/Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/files"
+databricks workspace import "$ROOT/scripts/bootstrap_load_current" --file scripts/bootstrap_load_current.py --format SOURCE --language PYTHON --overwrite --profile <profile>
+$json = @"
+{"run_name": "adf-bootstrap",
+ "tasks": [{"task_key": "main",
+   "notebook_task": {"notebook_path": "$ROOT/scripts/bootstrap_load_current",
+                     "base_parameters": {"catalog": "address_book", "src_path": "$ROOT/src",
+                                         "baseline_table": "adf_usa_baseline",
+                                         "release_version": "$($r.release_version)",
+                                         "source_version": "$($r.source_version)",
+                                         "expected_rows": "$($r.row_count)"}},
+   "environment_key": "e"}],
+ "environments": [{"environment_key": "e", "spec": {"client": "4"}}]}
+"@
+[System.IO.File]::WriteAllText("$env:TEMP\bootstrap.json", $json)
+databricks jobs submit --json "@$env:TEMP\bootstrap.json" --profile <profile>
+```
 
-   ```bat
-   databricks workspace import /Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/files/scripts/bootstrap_load_current --file scripts\bootstrap_load_current.py --format SOURCE --language PYTHON --overwrite --profile DEFAULT
-   ```
-
-2. Run `notepad bootstrap.json`, answer Yes to create it, paste this, replace `<you>` and the three `<...>` values
-   from step 5 (`expected_rows` must be the digits of `row_count`, no commas), and save:
-
-   ```json
-   {"run_name": "adf-bootstrap",
-    "tasks": [{"task_key": "main",
-      "notebook_task": {"notebook_path": "/Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/files/scripts/bootstrap_load_current",
-                        "base_parameters": {"catalog": "address_book",
-                                            "src_path": "/Workspace/Users/<you>/.bundle/adf-usa-merge-pipeline/files/src",
-                                            "baseline_table": "adf_usa_baseline",
-                                            "release_version": "<release_version>",
-                                            "source_version": "<source_version>",
-                                            "expected_rows": "<row_count>"}},
-      "environment_key": "e"}],
-    "environments": [{"environment_key": "e", "spec": {"client": "4"}}]}
-   ```
-
-3. Submit it, then delete the file (do not commit it):
-
-   ```bat
-   databricks jobs submit --json @bootstrap.json --profile DEFAULT
-   del bootstrap.json
-   ```
-
-If the run fails with `Workload failed`, read the real error: `databricks jobs get-run <run_id> --profile DEFAULT`, take the
-`run_id` of the `main` task, then `databricks jobs get-run-output <task_run_id> --profile DEFAULT` (see `error` and `error_trace`).
+If the run fails with `Workload failed`, read the real error: `databricks jobs get-run <run_id> --profile <profile>`, take the
+`run_id` of the `main` task, then `databricks jobs get-run-output <task_run_id> --profile <profile>` (see `error` and `error_trace`).
 
 Check: `SELECT status, count(*) FROM address_book.bronze.adf_usa_current GROUP BY 1` gives `row_count` rows, all BASELINE.
 
 ### 7. Create the consumer grants (once)
 
 ```bash
-databricks experimental aitools tools query --profile DEFAULT "GRANT USE CATALOG ON CATALOG address_book TO \`account users\`"
-databricks experimental aitools tools query --profile DEFAULT "GRANT USE SCHEMA, SELECT ON SCHEMA address_book.silver TO \`account users\`"
+databricks experimental aitools tools query --profile <profile> "GRANT USE CATALOG ON CATALOG address_book TO \`account users\`"
+databricks experimental aitools tools query --profile <profile> "GRANT USE SCHEMA, SELECT ON SCHEMA address_book.silver TO \`account users\`"
 ```
 
-Windows (Command Prompt): backticks are not escapes in `cmd`, so drop the backslashes:
+Windows PowerShell: use single quotes, so the backticks around the group name are literal:
 
-```bat
-databricks experimental aitools tools query --profile DEFAULT "GRANT USE CATALOG ON CATALOG address_book TO `account users`"
-databricks experimental aitools tools query --profile DEFAULT "GRANT USE SCHEMA, SELECT ON SCHEMA address_book.silver TO `account users`"
+```powershell
+databricks experimental aitools tools query --profile <profile> 'GRANT USE CATALOG ON CATALOG address_book TO `account users`'
+databricks experimental aitools tools query --profile <profile> 'GRANT USE SCHEMA, SELECT ON SCHEMA address_book.silver TO `account users`'
 ```
 
 Use a narrower group when you have one (see `sql/grants.template.sql`).
@@ -240,7 +239,7 @@ Use a narrower group when you have one (see `sql/grants.template.sql`).
 ### 8. Run the pipeline
 
 ```bash
-databricks bundle run adf_usa_release -t prod --profile DEFAULT
+databricks bundle run adf_usa_release -t prod --profile <profile>
 ```
 
 `adf-detect` finds vintages newer than the baseline and seeds PROPOSED labels. `adf-release` applies every pending release
@@ -277,11 +276,11 @@ changefile was rejected and the MERGE took over.
 After the baseline is loaded and verified:
 
 ```bash
-databricks experimental aitools tools query --profile DEFAULT "DROP TABLE address_book.bronze.adf_usa_baseline"
+databricks experimental aitools tools query --profile <profile> "DROP TABLE address_book.bronze.adf_usa_baseline"
 ```
 
 The job runs daily at 06:30 UTC (`resources/adf_usa_release.job.yml`, `pause_status: UNPAUSED`). To pause it, set
-`PAUSED`, push through a PR and redeploy (step 3). Failures email `alert_email` (`databricks.yml`).
+`PAUSED`, push through a PR and redeploy (step 3). Failures email `alert_email` (`databricks.yml`), which defaults to the user who deployed the bundle (`${workspace.current_user.userName}`); override with `--var alert_email=...`.
 
 ## Operating it
 
@@ -293,7 +292,7 @@ The job runs daily at 06:30 UTC (`resources/adf_usa_release.job.yml`, `pause_sta
   | `source_table` | `precisely_product_share.precisely_db_property_graph.adf_usa` | Main table Delta Share |
   | `changefile_table` | `precisely_product_share.precisely_db_property_graph.adf_usa_changefile` | Changefile Delta Share |
 
-  Override for one run: `databricks bundle run adf_usa_release -t prod --params catalog=my_catalog,source_table=...,changefile_table=...`
+  Override for one run: `databricks bundle run adf_usa_release -t prod --profile <profile> --params catalog=my_catalog,source_table=...,changefile_table=...`
   (or "Run now with different parameters" in the UI). To change the scheduled defaults, edit the variables in `databricks.yml`
   (or `--var catalog=...` at deploy). A new catalog also needs steps 4 to 6 (DDL, baseline, bootstrap) run against it,
   using that catalog name. The pins in `ops.release_label` are Delta versions of the source table, so switching
@@ -316,7 +315,7 @@ The job runs daily at 06:30 UTC (`resources/adf_usa_release.job.yml`, `pause_sta
   fallbacks, ...). They use throwaway `zz_syn_*` schemas that are dropped afterwards:
 
   ```bash
-  databricks workspace import $ROOT/scripts/run_synthetic --file scripts/run_synthetic.py --format SOURCE --language PYTHON --overwrite --profile DEFAULT
+  databricks workspace import $ROOT/scripts/run_synthetic --file scripts/run_synthetic.py --format SOURCE --language PYTHON --overwrite --profile <profile>
   # then submit it like step 6 with base_parameters {"root": "$ROOT", "catalog": "address_book"}
   ```
 
