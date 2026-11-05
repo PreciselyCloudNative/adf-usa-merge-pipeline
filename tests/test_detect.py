@@ -4,7 +4,14 @@ import json
 
 import pytest
 
-from adf_merge.detect import DetectError, parse_vintage_commits, pending_releases, plan_detection, vintage_key
+from adf_merge.detect import (
+    DetectError,
+    parse_vintage_commits,
+    pending_releases,
+    plan_detection,
+    retention_expired,
+    vintage_key,
+)
 
 
 def _commit(version, vintage, count=100, ts="2026-10-27T16:25:12.000Z", op="SET TBLPROPERTIES"):
@@ -89,3 +96,15 @@ def test_old_irregular_history_is_ignored_and_unpadded_vintages_parse():
     labels = {"2026.10.1": _label("2026.10.1", 219, "CONFIRMED", "COMPLETE"),
               "2026.10.2": _label("2026.10.2", 227, "PROPOSED", "COMPLETE")}
     assert plan_detection(commits, labels, {"precisely.data.vintage": "2026.10.2"}) == {"new_labels": [], "anomalies": []}
+
+
+def test_retention_expired_detects_vacuumed_pin_and_reports_window():
+    err = ("Error: query failed: BAD_REQUEST [DELTA_UNSUPPORTED_TIME_TRAVEL_BEYOND_DELETED_FILE_RETENTION_DURATION] "
+           "Cannot time travel beyond delta.deletedFileRetentionDuration (168 HOURS) set on the table.")
+    assert retention_expired(err) == "168 HOURS"
+
+
+def test_retention_expired_ignores_other_errors():
+    assert retention_expired("PERMISSION_DENIED: no access to share") is None
+    assert retention_expired("") is None
+    assert retention_expired(None) is None
