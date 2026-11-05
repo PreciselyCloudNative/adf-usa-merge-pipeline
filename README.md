@@ -139,6 +139,11 @@ The commands below read `release_version` and `source_version` from that JSON an
 into `adf_usa_baseline`, so there is nothing to copy and paste. The share keeps only about 7 days of history, so do this
 right away. Replace `<profile>` in both commands. They also print the three values that step 6 needs.
 
+> **If `latest_release.py` stops with "older than the share's time-travel window":** the newest release is still
+> the latest, but Precisely has already vacuumed its data files, so it can no longer be copied. Do not continue and do
+> not pick a newer version by hand (the share changes between releases, so the row count would not match the release
+> label). Wait for the next release, or ask Precisely to extend the share's `delta.deletedFileRetentionDuration`.
+
 Git Bash / macOS / Linux:
 
 ```bash

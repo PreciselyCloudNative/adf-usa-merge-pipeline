@@ -62,6 +62,19 @@ def parse_vintage_commits(history_rows: list[dict]) -> list[dict]:
     return sorted(out, key=lambda c: c["version"])
 
 
+RETENTION_ERROR = "DELTA_UNSUPPORTED_TIME_TRAVEL_BEYOND_DELETED_FILE_RETENTION_DURATION"
+_RETENTION_RE = re.compile(r"deletedFileRetentionDuration \((\d+) (\w+)\)")
+
+
+def retention_expired(error_text: str) -> str | None:
+    """If a time-travel probe failed because the pinned version is past the share's file retention,
+    return the retention window as text (e.g. '168 HOURS'); otherwise None."""
+    if RETENTION_ERROR not in (error_text or ""):
+        return None
+    m = _RETENTION_RE.search(error_text)
+    return f"{m.group(1)} {m.group(2)}" if m else "unknown"
+
+
 def plan_detection(commits: list[dict], labels: dict[str, dict], table_props: dict) -> dict:
     """Decide which release_label rows to seed. `labels` is {release_version: row}.
 
