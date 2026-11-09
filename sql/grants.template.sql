@@ -1,3 +1,4 @@
--- Run once per consumer principal (group preferred). Consumers get silver only.
+-- Run once per consumer principal (group preferred). Consumers get silver and gold only, never bronze or ops.
 -- GRANT USE CATALOG ON CATALOG ${catalog} TO `<group>`;
 -- GRANT USE SCHEMA, SELECT ON SCHEMA ${catalog}.silver TO `<group>`;
+-- GRANT USE SCHEMA, SELECT ON SCHEMA ${catalog}.gold TO `<group>`;

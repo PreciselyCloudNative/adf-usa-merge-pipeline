@@ -245,10 +245,13 @@ def run_release_changefile(spark, p: Params, plan: dict) -> dict:
         applied = {}
         if not already:
             cf_h.createOrReplaceTempView("adf_cf_h")
+            before = rel.latest_version(spark, p.current)
             spark.sql(changefile_merge_sql(p, seq))
-            applied = {"current_table_version": spark.sql(f"DESCRIBE HISTORY {p.current} LIMIT 1").collect()[0]["version"]}
+            rel.publish_history(spark, p, seq, before)
+            applied = {"current_table_version": rel.latest_version(spark, p.current)}
             rel._log_update(spark, p, state="APPLIED", current_table_version=applied["current_table_version"])
         rel.publish_change_log(spark, p, seq)
+        rel.publish_history(spark, p, seq)  # no-op after the apply above; recovers a crash between MERGE and archive
 
         audited = p.audit and pin is not None and detect.pin_readable(spark, p, pin)
         src_h = rel.hashed_source(rel.read_source(spark, p, pin)) if audited else None

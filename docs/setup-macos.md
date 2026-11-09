@@ -74,7 +74,7 @@ in `databricks.yml` (`--var catalog=...` to override).
 python scripts/apply_ddl.py --profile <profile> --catalog address_book
 ```
 
-Creates `bronze`, `ops` and `silver` plus all tables and views from `sql/ddl/`. Safe to re-run.
+Creates `bronze`, `ops`, `silver` and `gold` plus all tables and views from `sql/ddl/`. Safe to re-run.
 
 ## 5. Pick the baseline release and freeze it
 
@@ -107,7 +107,8 @@ databricks experimental aitools tools query --profile <profile> "SELECT count(*)
 ## 6. Load `adf_usa_current` from the baseline and seed the labels
 
 `scripts/bootstrap_load_current.py` is a notebook. It hashes the baseline into `adf_usa_current` (status BASELINE,
-seq 1), seeds `ops.release_label` with the baseline release and writes the baseline row of `ops.release_log`. It refuses
+seq 1), seeds `ops.release_label` with the baseline release, writes the baseline row of `ops.release_log` (with the rollback
+pointer the next release's history archive needs) and creates the first gold view. It refuses
 to run twice.
 
 **Run this in the same terminal as step 5**, which set `$REL`, `$VER` and `$ROWS`. If you opened a new terminal, do not
@@ -144,6 +145,7 @@ Check: `SELECT status, count(*) FROM address_book.bronze.adf_usa_current GROUP B
 ```bash
 databricks experimental aitools tools query --profile <profile> "GRANT USE CATALOG ON CATALOG address_book TO \`account users\`"
 databricks experimental aitools tools query --profile <profile> "GRANT USE SCHEMA, SELECT ON SCHEMA address_book.silver TO \`account users\`"
+databricks experimental aitools tools query --profile <profile> "GRANT USE SCHEMA, SELECT ON SCHEMA address_book.gold TO \`account users\`"
 ```
 
 Use a narrower group when you have one (see `sql/grants.template.sql`).

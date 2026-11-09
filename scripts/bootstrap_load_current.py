@@ -1,5 +1,6 @@
 # Databricks notebook source
-# One-off bootstrap: load adf_usa_current from the frozen baseline table and seed the control tables.
+# One-off bootstrap: load adf_usa_current from the frozen baseline table, seed the control tables and create the
+# first gold release view (gold.adf_usa_<release>, gold.adf_usa_latest).
 # Run on serverless via `databricks jobs submit`. Refuses to run if adf_usa_current already has rows.
 # Parameters (notebook base_parameters), the last four come from scripts/latest_release.py and the baseline CTAS:
 #   catalog, src_path (workspace dir that contains adf_merge/), baseline_table, release_version, source_version, expected_rows
@@ -27,6 +28,8 @@ if src_path:
 from pyspark.sql import functions as F
 
 from adf_merge.hashing import HASH_SPEC_VERSION, row_hash_expr
+from adf_merge import gold
+from adf_merge.release import Params
 from adf_merge.schema import HASH_COLUMNS, SOURCE_COLUMNS
 
 BASELINE = f"{catalog}.bronze.{dbutils.widgets.get('baseline_table')}"
@@ -69,6 +72,8 @@ loaded = (
     )
 )
 loaded.writeTo(CURRENT).append()
+# Rollback pointer and the pre-image source for the next release's history capture.
+CURRENT_VERSION = spark.sql(f"DESCRIBE HISTORY {CURRENT} LIMIT 1").collect()[0]["version"]
 
 # COMMAND ----------
 # Verify
@@ -109,8 +114,10 @@ WHEN NOT MATCHED THEN INSERT
   (release_version, release_seq, run_id, state, source_delta_version, source_row_count, added, updated, deleted,
    current_table_version, hash_spec_version, started_at, finished_at, error, method)
 VALUES ('{RELEASE}', {RELEASE_SEQ}, 'bootstrap', 'COMPLETE', {SOURCE_VERSION}, {n}, NULL, NULL, NULL,
-        NULL, {HASH_SPEC_VERSION}, current_timestamp(), current_timestamp(), NULL, 'BASELINE')
+        {CURRENT_VERSION}, {HASH_SPEC_VERSION}, current_timestamp(), current_timestamp(), NULL, 'BASELINE')
 """
 )
 
-dbutils.notebook.exit(json.dumps({"loaded": stats, "baseline_rows": n}))
+published = gold.refresh(spark, Params(catalog=catalog, release_version=RELEASE))
+
+dbutils.notebook.exit(json.dumps({"loaded": stats, "baseline_rows": n, "gold": published}))

@@ -1,6 +1,6 @@
 """Synthetic end-to-end scenarios, run on Databricks against a throwaway source table (never the real share).
 
-Each scenario gets its own schemas (src / bronze / ops) in the target catalog, built from the repo DDL, a 2,000-row
+Each scenario gets its own schemas (src / bronze / ops / silver / gold) in the target catalog, built from the repo DDL, a 2,000-row
 synthetic adf_usa source, and a baseline load, then exercises the real release / detect code.
 """
 
@@ -9,7 +9,7 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from adf_merge import changefile, detect, maintenance, release
+from adf_merge import changefile, detect, gold, maintenance, release
 from adf_merge.hashing import HASH_SPEC_VERSION
 from adf_merge.release import GateError, Params
 from adf_merge.schema import HASH_COLUMNS, SOURCE_COLUMNS
@@ -43,7 +43,7 @@ class Env:
         self.spark, self.catalog = spark, catalog
         tag = uuid.uuid4().hex[:8]
         self.src_schema, self.bronze, self.ops = f"zz_syn_src_{tag}", f"zz_syn_bronze_{tag}", f"zz_syn_ops_{tag}"
-        self.silver = f"zz_syn_silver_{tag}"
+        self.silver, self.gold = f"zz_syn_silver_{tag}", f"zz_syn_gold_{tag}"
         self.src = f"{catalog}.{self.src_schema}.adf_usa"
         for s in (self.src_schema, self.bronze, self.ops):
             spark.sql(f"CREATE SCHEMA {catalog}.{s}")
@@ -51,11 +51,13 @@ class Env:
             text = f.read_text().replace("${catalog}.bronze.", f"{catalog}.{self.bronze}.")
             text = text.replace("${catalog}.ops.", f"{catalog}.{self.ops}.")
             text = text.replace("${catalog}.silver", f"{catalog}.{self.silver}")
+            text = text.replace("${catalog}.gold", f"{catalog}.{self.gold}")
             for stmt in (s.strip() for s in text.split(";")):
                 if stmt:
                     spark.sql(stmt)
         self._create_source()
-        self.p = Params(catalog=catalog, bronze_schema=self.bronze, ops_schema=self.ops, source_table=self.src,
+        self.p = Params(catalog=catalog, bronze_schema=self.bronze, ops_schema=self.ops, silver_schema=self.silver,
+                        gold_schema=self.gold, source_table=self.src,
                         deleted_tolerance=0, changefile_table=f"{catalog}.{self.src_schema}.adf_usa_changefile",
                         use_changefile=False)
 
@@ -192,12 +194,26 @@ class Env:
         rows = self.sql(f"SELECT change_type, count(*) n FROM {self.p.change_log} WHERE release_seq = {seq} GROUP BY 1").collect()
         return {r["change_type"]: r["n"] for r in rows}
 
+    def history_count(self, seq):
+        return self.sql(f"SELECT count(*) FROM {self.p.history} WHERE valid_to_seq = {seq}").collect()[0][0]
+
+    def gold_view(self, vintage):
+        return f"{self.catalog}.{self.gold}.{gold.view_name(vintage)}"
+
+    def pinned(self, vintage):
+        """Fingerprint (rows, content) of the source exactly as the vendor published `vintage`."""
+        pin = self.sql(f"SELECT source_delta_version FROM {self.p.release_label} WHERE release_version = '{vintage}'").collect()[0][0]
+        return release.fingerprint(release.hashed_source(release.read_source(self.spark, self.p, pin)))
+
+    def gold_fingerprint(self, vintage):
+        return release.fingerprint(release.hashed_source(self.spark.table(self.gold_view(vintage))))
+
     def row(self, i):
         r = self.sql(f"SELECT * FROM {self.p.current} WHERE PBKEY = '{self.key(i)}'").collect()
         return r[0].asDict() if r else None
 
     def drop(self):
-        for s in (self.src_schema, self.bronze, self.ops, self.silver):
+        for s in (self.src_schema, self.bronze, self.ops, self.silver, self.gold):
             self.sql(f"DROP SCHEMA IF EXISTS {self.catalog}.{s} CASCADE")
 
 
@@ -328,6 +344,7 @@ def s09_validation_failure_and_rollback(env: Env):
     check(r["restored"], "rollback must restore")
     eq(env.current_counts(), {"BASELINE": N}, "current back to baseline")
     eq(env.change_log_counts(2), {}, "change log cleared")
+    eq(env.history_count(2), 0, "superseded versions cleared with the rollback")
     eq(env.log_state("2099.01.1"), "ROLLED_BACK", "state after rollback")
     env.sql(f"UPDATE {env.p.release_label} SET vendor_updated = 4 WHERE release_version = '2099.01.1'")
     r = env.run("2099.01.1")
@@ -631,4 +648,127 @@ def c09_changefile_matches_merge(env: Env):
     eq((diff["added"], diff["updated"], diff["deleted"], diff["reappeared"]), (0, 0, 0, 0), "MERGE sees no difference")
 
 
-SCENARIOS = [v for k, v in sorted(globals().items()) if re.match(r"[sc]\d\d_", k)]
+# ---- history and gold release views --------------------------------------------------------------
+
+
+def _three_more_releases(env: Env):
+    """2099.01.1 by MERGE, .2 by changefile, .3 by MERGE: updates twice, update then delete, delete then resurrect."""
+    env.src_insert(N, N + 10)
+    env.src_update(0, 10, "CITY = 'R1'")
+    env.src_delete(100, 105)
+    pin = env.mark_release("2099.01.1")
+    env.label("2099.01.1", pin)
+    env.run("2099.01.1")
+    gold.refresh(env.spark, env.p)
+
+    env.src_update(5, 15, "CITY = 'R2'")      # 5-9 changed again, 10-14 for the first time
+    env.src_delete(0, 3)                      # updated in release 2, now deleted
+    pin = env.mark_release("2099.01.2")
+    env.label("2099.01.2", pin)
+    env.write_changefile("2099.01.2", updated=(5, 15), deleted=(0, 3))
+    r = env.auto("2099.01.2")
+    eq(r["method"], "CHANGEFILE", "release 3 by changefile")
+    gold.refresh(env.spark, env.p)
+
+    env.sql(f"INSERT INTO {env.src} SELECT {env.row_select('id')} FROM range(100, 103)")   # resurrect 100-102
+    env.src_update(200, 210, "CITY = 'R3'")
+    pin = env.mark_release("2099.01.3")
+    env.label("2099.01.3", pin)
+    env.run("2099.01.3")
+    return gold.refresh(env.spark, env.p)
+
+
+def g01_every_release_is_reproducible(env: Env):
+    out = _three_more_releases(env)
+    eq(out["views"], 4, "one view per release")
+    for v in (BASE_VINTAGE, "2099.01.1", "2099.01.2", "2099.01.3"):
+        eq(env.gold_fingerprint(v), env.pinned(v), f"gold view as of {v} equals the vendor table at that release")
+    eq(env.history_count(2), 10 + 5, "release 2 superseded 10 updates + 5 deletes")
+    eq(env.history_count(3), 10 + 3, "release 3 superseded 10 updates + 3 deletes")
+    eq(env.history_count(4), 10, "release 4 superseded 10 updates; resurrected keys had only tombstones")
+    old = env.sql(f"SELECT CITY, release_version FROM {env.gold_view(BASE_VINTAGE)} WHERE PBKEY = '{env.key(7)}'").collect()[0]
+    eq(tuple(old), ("CITY_7", BASE_VINTAGE), "a record updated twice shows its original value at the baseline")
+    mid = env.sql(f"SELECT CITY, release_version FROM {env.gold_view('2099.01.1')} WHERE PBKEY = '{env.key(7)}'").collect()[0]
+    eq(tuple(mid), ("R1", "2099.01.1"), "...its first update in the next release")
+    gone = env.sql(f"SELECT count(*) FROM {env.gold_view('2099.01.2')} WHERE PBKEY = '{env.key(101)}'").collect()[0][0]
+    eq(gone, 0, "a record deleted in release 2 is absent from release 3 until it is resurrected")
+    back = env.sql(f"SELECT release_version, reappeared FROM {env.gold_view('2099.01.3')} WHERE PBKEY = '{env.key(101)}'").collect()[0]
+    eq(tuple(back), ("2099.01.3", True), "...and present again in release 4")
+
+
+def g02_latest_alias_tags_and_versions(env: Env):
+    out = _three_more_releases(env)
+    check("tag_errors" not in out, f"tagging failed: {out}")
+    g = f"{env.catalog}.{env.gold}"
+
+    def tags():
+        """None when the caller cannot read information_schema.table_tags (it sits on the system catalog)."""
+        try:
+            rows = env.sql(f"SELECT table_name, tag_value FROM {env.catalog}.information_schema.table_tags "
+                           f"WHERE schema_name = '{env.gold}' AND tag_name = '{gold.TAG}'").collect()
+        except Exception as e:  # noqa: BLE001
+            check("INSUFFICIENT_PERMISSIONS" in str(e), f"unexpected error reading tags: {e}")
+            return None
+        return {r["table_name"]: r["tag_value"] for r in rows}
+
+    t = tags()
+    if t is not None:
+        eq(t["adf_usa_latest"], "latest", "alias tagged latest")
+        eq(t[gold.view_name("2099.01.3")], "latest", "newest release view tagged latest")
+        others = {v for k, v in t.items() if k not in ("adf_usa_latest", gold.view_name("2099.01.3"))}
+        eq(sorted(others), ["archived"], "older tagged archived")
+    eq(env.sql(f"SELECT count(*) FROM {g}.adf_usa_latest").collect()[0][0],
+       env.sql(f"SELECT count(*) FROM {env.gold_view('2099.01.3')}").collect()[0][0], "alias = newest release view")
+    eq(env.sql(f"SELECT view_name FROM {g}.adf_usa_versions WHERE is_latest").collect()[0][0], gold.view_name("2099.01.3"), "versions index")
+    eq(env.sql(f"SELECT count(*) FROM {g}.adf_usa_versions").collect()[0][0], 4, "versions index lists every release")
+    env.src_update(300, 305, "CITY = 'R4'")
+    pin = env.mark_release("2099.01.4")
+    env.label("2099.01.4", pin)
+    env.run("2099.01.4")
+    out = gold.refresh(env.spark, env.p)
+    check("tag_errors" not in out, f"tagging failed: {out}")
+    eq(env.sql(f"SELECT view_name FROM {g}.adf_usa_versions WHERE is_latest").collect()[0][0], gold.view_name("2099.01.4"), "index moves")
+    t = tags()
+    if t is not None:
+        eq((t[gold.view_name("2099.01.3")], t[gold.view_name("2099.01.4")]), ("archived", "latest"), "the tag moves with the release")
+
+
+def g03_rollback_drops_view_and_history(env: Env):
+    env.src_update(0, 6, "CITY = 'RB'")
+    pin = env.mark_release("2099.01.1")
+    env.label("2099.01.1", pin)
+    env.run("2099.01.1")
+    gold.refresh(env.spark, env.p)
+    eq(env.history_count(2), 6, "archived before the rollback")
+    release.rollback_release(env.spark, replace(env.p, release_version="2099.01.1"))
+    out = gold.refresh(env.spark, env.p)
+    eq((env.history_count(2), out["dropped"]), (0, [gold.view_name("2099.01.1")]), "history and release view removed")
+    eq(env.sql(f"SELECT release_version FROM {env.catalog}.{env.gold}.adf_usa_versions").collect()[0][0], BASE_VINTAGE, "index back to baseline")
+    eq(env.gold_fingerprint(BASE_VINTAGE), env.pinned(BASE_VINTAGE), "baseline view still exact")
+
+
+def g04_crash_before_archive_recovers(env: Env):
+    env.src_update(0, 4, "CITY = 'CR'")
+    env.src_delete(50, 52)
+    pin = env.mark_release("2099.01.1")
+    env.label("2099.01.1", pin)
+    real = release.publish_history
+
+    def boom(*a, **k):
+        raise RuntimeError("simulated crash after MERGE")
+
+    release.publish_history = boom
+    try:
+        raises(RuntimeError, lambda: env.run("2099.01.1"), "simulated crash")
+    finally:
+        release.publish_history = real
+    eq(env.history_count(2), 0, "nothing archived yet")
+    r = env.run("2099.01.1")
+    eq(r["counts"]["updated"] + r["counts"]["deleted"], 6, "counts after recovery")
+    eq(env.history_count(2), 6, "recovery archived the superseded versions")
+    gold.refresh(env.spark, env.p)
+    eq(env.gold_fingerprint(BASE_VINTAGE), env.pinned(BASE_VINTAGE), "baseline reproducible after recovery")
+    eq(env.gold_fingerprint("2099.01.1"), env.pinned("2099.01.1"), "release reproducible after recovery")
+
+
+SCENARIOS = [v for k, v in sorted(globals().items()) if re.match(r"[scg]\d\d_", k)]

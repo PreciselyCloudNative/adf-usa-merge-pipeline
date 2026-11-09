@@ -25,3 +25,11 @@ COMMENT 'Applied releases (vintages) with their change counts.'
 AS SELECT l.release_seq, l.release_version, b.release_date, coalesce(l.added, b.vendor_added) AS added, coalesce(l.updated, b.vendor_updated) AS updated, coalesce(l.deleted, b.vendor_deleted) AS deleted, l.source_row_count AS row_count, l.finished_at
 FROM ${catalog}.ops.release_log l LEFT JOIN ${catalog}.ops.release_label b USING (release_version)
 WHERE l.state = 'COMPLETE';
+
+CREATE OR REPLACE VIEW ${catalog}.silver.adf_usa_history
+COMMENT 'Superseded versions of records: a record version is valid from release_seq (inclusive) to valid_to_seq (exclusive). Used by the gold per-release views.'
+AS SELECT PBKEY, PARENT, GOVID, GEOID, FORMATTEDADDRESS, ADDRLINE1, ADDRLINE2, ADDRLINE3, ADDRLINE4, ADDNUMBER, ADDNUMBER2,
+  STREETNAME, STREETPREDIR, STREET, STREETSUFFIX, STREETPOSTDIR, UNITTYPE, UNIT, LEVEL, BUILDINGNAME, CITY, POSTALCODE,
+  POSTALCODEEXT, ADMIN2, ADMIN1, COUNTRY, LOCCODE, LATITUDE, LONGITUDE, PROPTYPE, LANGCODE, FIPS,
+  status, release_version, release_seq, changed_at, reappeared, valid_to_seq, valid_to_version
+FROM ${catalog}.bronze.adf_usa_history;

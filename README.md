@@ -32,8 +32,35 @@ Source: `docs/architecture.excalidraw` (open it at excalidraw.com to edit, then 
 | `silver.adf_usa_current` | Consumer view: live rows only, no hash columns |
 | `silver.adf_usa_change_feed` | Consumer view: the rows changed after the baseline, including tombstones |
 | `silver.adf_usa_change_log`, `silver.adf_usa_releases` | Consumer views of the change history and the release list |
+| `bronze.adf_usa_history` | Superseded versions: every live version that a later release updated or deleted, valid from `release_seq` (inclusive) to `valid_to_seq` (exclusive) |
+| `silver.adf_usa_history` | Consumer view of the above |
+| `gold.adf_usa_<release>` (e.g. `gold.adf_usa_2026_10_3`) | The table **as of that release**, exactly as it was then. A view, no data copy |
+| `gold.adf_usa_latest` | Alias of the newest release (same rows as `silver.adf_usa_current`) |
+| `gold.adf_usa_versions` | Index of the release views: `release_version`, `view_name`, counts, `is_latest` |
 
-Consumers get `USE CATALOG` on the catalog and `USE SCHEMA`, `SELECT` on `silver` only (`sql/grants.template.sql`).
+Consumers get `USE CATALOG` on the catalog and `USE SCHEMA`, `SELECT` on `silver` and `gold` only (`sql/grants.template.sql`).
+
+### Release views (gold)
+
+`adf_usa_current` only holds each record at its last change, so on its own it cannot show an older release. Before each
+release is applied, the live versions it is about to update or delete are copied to `bronze.adf_usa_history` (the
+changed records only, never a full copy). Release N is then reproducible as a view:
+
+```sql
+SELECT ... FROM silver.adf_usa_current WHERE release_seq <= N                              -- unchanged since N
+UNION ALL
+SELECT ... FROM silver.adf_usa_history WHERE release_seq <= N AND valid_to_seq > N         -- changed or deleted later
+```
+
+After every run `adf-release` (via `adf_merge.gold.refresh`) creates the view of each new release, points
+`gold.adf_usa_latest` at the newest, tags the newest view `release_status = latest` and the older ones `archived`
+(`information_schema.table_tags`), and drops the view of a rolled-back release. The history starts at the baseline: the
+releases before it were never captured, so the first gold view is the baseline release itself.
+
+Each release's archive is checked (rows archived = updated + deleted), and the synthetic suite proves every release view
+equals the vendor table at that release's pin. **Privacy:** the history keeps the old attributes of records a release
+removed (including NJ privacy removals) on purpose; sign-off to retain them was obtained. `adf_usa_current` itself still
+holds only tombstones.
 
 ## Setup
 
@@ -88,6 +115,8 @@ SELECT status, count(*) FROM address_book.bronze.adf_usa_current GROUP BY 1;
 -- consumers
 SELECT * FROM address_book.silver.adf_usa_releases;
 SELECT status, release_version, count(*) FROM address_book.silver.adf_usa_change_feed GROUP BY 1, 2;
+SELECT * FROM address_book.gold.adf_usa_versions ORDER BY release_seq;   -- the release views, newest flagged is_latest
+SELECT count(*) FROM address_book.gold.adf_usa_2026_10_3;                -- the table as of that release
 ```
 
 Per applied release expect `method = CHANGEFILE`, `audit = PASSED`, added/updated/deleted equal to the Precisely document, and
@@ -106,7 +135,7 @@ databricks experimental aitools tools query --profile <profile> "DROP TABLE addr
 
   | Parameter | Default | Meaning |
   |---|---|---|
-  | `catalog` | `address_book` | Target catalog (schemas `bronze`, `ops`, `silver`) |
+  | `catalog` | `address_book` | Target catalog (schemas `bronze`, `ops`, `silver`, `gold`) |
   | `source_table` | `precisely_product_share.precisely_db_property_graph.adf_usa` | Main table Delta Share |
   | `changefile_table` | `precisely_product_share.precisely_db_property_graph.adf_usa_changefile` | Changefile Delta Share |
 
@@ -122,14 +151,15 @@ databricks experimental aitools tools query --profile <profile> "DROP TABLE addr
   `UPDATE ops.release_label SET status='CONFIRMED', vendor_added=..., vendor_updated=..., vendor_deleted=...,
   confirmed_by=..., confirmed_at=current_timestamp() WHERE release_version='...'`, ideally before the changefile apply.
 * **Roll back the newest release**: `adf_merge.release.rollback_release` restores `adf_usa_current` to the previous release's
-  Delta version and clears the change log. It only works inside the 7-day Delta retention.
+  Delta version and clears the change log and that release's history rows (the next run drops its gold view). It only works
+  inside the 7-day Delta retention.
 * **Maintenance** runs inside `adf-release`: `REORG ... PURGE` after releases with deletes, `VACUUM` (7-day retention).
 * **Failed run**: the release stays FAILED in `ops.release_log`; fix the cause and re-run the job (reruns are idempotent).
 
 ## Tests
 
 * Local: `.venv/bin/python -m pytest tests -q` on macOS/Linux, `.venv\Scripts\python.exe -m pytest tests -q` on Windows (hashing, release helpers, detection).
-* Synthetic scenarios on Databricks (26: normal, resurrection, rebuild, schema drift, rollback, missed releases, changefile
+* Synthetic scenarios on Databricks (30: normal, resurrection, rebuild, schema drift, rollback, missed releases, changefile
   fallbacks, ...). They use throwaway `zz_syn_*` schemas that are dropped afterwards:
 
   ```bash
@@ -140,8 +170,8 @@ databricks experimental aitools tools query --profile <profile> "DROP TABLE addr
 ## Repo layout
 
 ```
-src/adf_merge/   hashing, release (MERGE, gates, validate, rollback), changefile, detect, maintenance, cli
-sql/ddl/         schemas, tables, silver views (${catalog} placeholder)
+src/adf_merge/   hashing, release (MERGE, history, gates, validate, rollback), changefile, detect, gold, maintenance, cli
+sql/ddl/         schemas, tables, silver views, gold schema (${catalog} placeholder)
 sql/migrations/  one-offs for tables created before a change
 scripts/         apply_ddl.py, bootstrap_load_current.py (notebook), run_synthetic.py, run_release.py, run_maintenance.py
 resources/       the DAB job; databricks.yml = bundle, variables, target
