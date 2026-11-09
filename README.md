@@ -250,6 +250,16 @@ databricks bundle run adf_usa_release -t prod --profile <profile>
 `adf-detect` finds vintages newer than the baseline and seeds PROPOSED labels. `adf-release` applies every pending release
 in order. The task output is JSON; look for `"method": "CHANGEFILE"` and `"audit": "PASSED"`.
 
+**Re-marked releases.** The vendor can set the same vintage again after its release (the Thursday NJ_DELETION job
+deletes rows and sets `precisely.data.vintage` once more, with a new count, hours after the weekly marker). `adf-detect`
+compares the newest marker version of each vintage with the pin we applied. If it moved up and that release is the newest
+one applied, the label is re-pinned (`"remarked"` in the output, note appended to `release_label.notes`) and `adf-release`
+rolls the release back and re-applies it at the new pin, changefile first. Any other re-mark (an older release, or one
+in flight or CONFIRMED) fails detect for a human to resolve. A normal release defers while the changefile's marker is more than
+10 minutes older than the main table's marker (not re-published yet); a re-applied release never defers, because the
+table is missing it after the rollback, so it uses the changefile only if it is ready now and otherwise the MERGE. If the rollback itself fails
+(e.g. the previous table version was already vacuumed) the job fails each day until someone resolves it.
+
 The job takes three parameters: `catalog`, `source_table` (main table share) and `changefile_table` (changefile share).
 The defaults are set in `databricks.yml`; to use others for a run add
 `--params catalog=<catalog>,source_table=<share>.<schema>.adf_usa,changefile_table=<share>.<schema>.adf_usa_changefile`

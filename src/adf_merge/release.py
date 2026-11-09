@@ -361,7 +361,8 @@ def run_release(spark, p: Params) -> dict:
                     {HASH_SPEC_VERSION}, current_timestamp())"""
         )
     else:
-        _log_update(spark, p, run_id=p.run_id, state="STARTED", error=None)
+        _log_update(spark, p, run_id=p.run_id, state="STARTED", error=None, source_delta_version=pin,
+                    source_row_count=gates["source_rows"])
 
     try:
         already = spark.table(p.current).filter(f"release_seq = {seq}").limit(1).count() > 0
