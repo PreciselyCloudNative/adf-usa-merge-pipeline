@@ -290,4 +290,6 @@ def run_release_auto(spark, p: Params) -> dict:
         reason = f"changefile failed: {e}"
     if spark.table(p.release_log).filter(f"release_version = '{p.release_version}'").limit(1).count():
         rel.rollback_release(spark, p)
-    return rel.run_release(spark, replace(p, method="MERGE", fallback_reason=reason[:500]))
+    out = rel.run_release(spark, replace(p, method="MERGE", fallback_reason=reason[:500]))
+    out["fallback_reason"] = reason[:500]  # surfaced so the job can alert on it (see cli.changefile_alerts)
+    return out

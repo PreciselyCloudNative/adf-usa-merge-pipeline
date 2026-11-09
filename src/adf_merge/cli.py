@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import sys
 
 from adf_merge.detect import run_detect, run_pending
 from adf_merge.maintenance import after_releases
@@ -30,6 +31,17 @@ def _params(a, **extra) -> Params:
     return Params(
         catalog=a.catalog, bronze_schema=a.bronze_schema, ops_schema=a.ops_schema, source_table=a.source_table, **extra
     )
+
+
+def changefile_alerts(applied: list[dict]) -> list[str]:
+    """One line per release whose changefile is waiting (deferred) or was not ready/consistent (MERGE fallback)."""
+    lines = []
+    for r in applied:
+        if r.get("result") == "deferred":
+            lines.append(f"{r['release']}: WAITING for the changefile ({r.get('reason')})")
+        elif r.get("fallback_reason"):
+            lines.append(f"{r['release']}: applied by MERGE, changefile not used ({r['fallback_reason']})")
+    return lines
 
 
 def detect_main(argv=None) -> None:
@@ -61,6 +73,12 @@ def release_main(argv=None) -> None:
     out = run_pending(spark, p, require_confirmed=a.require_confirmed.lower() == "true")
     out["maintenance"] = after_releases(spark, p, out["applied"])
     print(to_json(out))
+    # The release itself is fine (deferred, or applied by the MERGE fallback), but a human should know the changefile
+    # was not usable. Exiting non-zero after the output is printed and maintenance has run makes the job's
+    # on_failure email (alert_email) fire, so no extra mail infrastructure is needed.
+    alerts = changefile_alerts(out["applied"])
+    if alerts:
+        sys.exit("CHANGEFILE ALERT:\n" + "\n".join(alerts))
 
 
 if __name__ == "__main__":
