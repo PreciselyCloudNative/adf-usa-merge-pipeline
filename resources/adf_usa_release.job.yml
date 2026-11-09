@@ -2,7 +2,7 @@ resources:
   jobs:
     adf_usa_release:
       name: adf-usa-release
-      description: Poll the vendor share for a new adf_usa release, then MERGE each pending release into adf_usa_current.
+      description: Poll the vendor share for a new adf_usa release, then apply each pending release to adf_usa_current (superseded versions go to adf_usa_history) and refresh the gold release views.
       max_concurrent_runs: 1
       # Run-time overridable (UI "Run now with different parameters", or `bundle run --params`). Defaults come from
       # the bundle variables in databricks.yml.

@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 
+from adf_merge import gold
 from adf_merge.detect import run_detect, run_pending
 from adf_merge.maintenance import after_releases
 from adf_merge.release import DEFAULT_CHANGEFILE_TABLE, DEFAULT_SOURCE_TABLE, Params, to_json
@@ -20,6 +21,8 @@ def _parser(description: str) -> argparse.ArgumentParser:
     ap.add_argument("--catalog", required=True)
     ap.add_argument("--bronze-schema", default="bronze")
     ap.add_argument("--ops-schema", default="ops")
+    ap.add_argument("--silver-schema", default="silver")
+    ap.add_argument("--gold-schema", default="gold")
     # Databricks also passes every job parameter to a wheel task as --<name>=<value>, with the underscores of the
     # job parameter names (source_table, changefile_table), so accept both spellings on both tasks.
     ap.add_argument("--source-table", "--source_table", dest="source_table", default=DEFAULT_SOURCE_TABLE)
@@ -29,7 +32,8 @@ def _parser(description: str) -> argparse.ArgumentParser:
 
 def _params(a, **extra) -> Params:
     return Params(
-        catalog=a.catalog, bronze_schema=a.bronze_schema, ops_schema=a.ops_schema, source_table=a.source_table, **extra
+        catalog=a.catalog, bronze_schema=a.bronze_schema, ops_schema=a.ops_schema, silver_schema=a.silver_schema,
+        gold_schema=a.gold_schema, source_table=a.source_table, **extra
     )
 
 
@@ -72,6 +76,7 @@ def release_main(argv=None) -> None:
     spark = _spark()
     out = run_pending(spark, p, require_confirmed=a.require_confirmed.lower() == "true")
     out["maintenance"] = after_releases(spark, p, out["applied"])
+    out["gold"] = gold.refresh(spark, p)
     print(to_json(out))
     # The release itself is fine (deferred, or applied by the MERGE fallback), but a human should know the changefile
     # was not usable. Exiting non-zero after the output is printed and maintenance has run makes the job's

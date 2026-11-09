@@ -1,6 +1,7 @@
 -- Source-faithful data tables. ${catalog} is substituted at deploy time (bundle variable).
--- Retention is 7 days on purpose: tombstoned (NJ privacy-removed) rows must not stay recoverable via time travel.
--- No change data feed on our tables: pre-images would retain removed addresses.
+-- adf_usa_current keeps a 7-day Delta retention and no change data feed: its tombstones carry no attributes.
+-- Superseded versions of changed or deleted records are kept on purpose in adf_usa_history (privacy sign-off
+-- obtained), which is what makes every past release reproducible (see the gold schema).
 
 CREATE TABLE IF NOT EXISTS ${catalog}.bronze.adf_usa_current (
   PBKEY            STRING NOT NULL,
@@ -69,3 +70,50 @@ TBLPROPERTIES (
   'delta.deletedFileRetentionDuration' = 'interval 7 days',
   'delta.logRetentionDuration' = 'interval 7 days'
 );
+
+CREATE TABLE IF NOT EXISTS ${catalog}.bronze.adf_usa_history (
+  PBKEY            STRING NOT NULL,
+  PARENT           STRING,
+  GOVID            STRING,
+  GEOID            STRING,
+  FORMATTEDADDRESS STRING,
+  ADDRLINE1        STRING,
+  ADDRLINE2        STRING,
+  ADDRLINE3        STRING,
+  ADDRLINE4        STRING,
+  ADDNUMBER        STRING,
+  ADDNUMBER2       STRING,
+  STREETNAME       STRING,
+  STREETPREDIR     STRING,
+  STREET           STRING,
+  STREETSUFFIX     STRING,
+  STREETPOSTDIR    STRING,
+  UNITTYPE         STRING,
+  UNIT             STRING,
+  LEVEL            STRING,
+  BUILDINGNAME     STRING,
+  CITY             STRING,
+  POSTALCODE       STRING,
+  POSTALCODEEXT    STRING,
+  ADMIN2           STRING,
+  ADMIN1           STRING,
+  COUNTRY          STRING,
+  LOCCODE          STRING,
+  LATITUDE         DOUBLE,
+  LONGITUDE        DOUBLE,
+  PROPTYPE         STRING,
+  LANGCODE         STRING,
+  FIPS             STRING,
+  row_hash          BINARY,
+  hash_spec_version INT,
+  status            STRING  NOT NULL COMMENT 'Status the row had while it was current: BASELINE, ADDED or UPDATED',
+  release_version   STRING  NOT NULL COMMENT 'Release that created this version (valid from, inclusive)',
+  release_seq       BIGINT  NOT NULL COMMENT 'Sequence of that release (valid from, inclusive)',
+  changed_at        TIMESTAMP,
+  reappeared        BOOLEAN,
+  valid_to_seq      BIGINT  NOT NULL COMMENT 'Sequence of the release that changed or deleted it (valid until, exclusive)',
+  valid_to_version  STRING  NOT NULL COMMENT 'Release label of valid_to_seq'
+)
+CLUSTER BY (valid_to_seq, PBKEY)
+COMMENT 'Superseded versions of live records: one row per version that a later release updated or deleted. Together with adf_usa_current it reproduces the table as of any release.'
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');

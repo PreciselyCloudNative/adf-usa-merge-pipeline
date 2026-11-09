@@ -18,7 +18,7 @@ TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 
 CREATE TABLE IF NOT EXISTS ${catalog}.ops.release_log (
   release_version       STRING  NOT NULL,
-  release_seq           BIGINT  NOT NULL COMMENT 'Monotonic sequence assigned by us, 1 = baseline 2026.10.1',
+  release_seq           BIGINT  NOT NULL COMMENT 'Monotonic sequence assigned by us, 1 = the baseline release',
   run_id                STRING,
   state                 STRING  NOT NULL COMMENT 'STARTED, GATED, APPLIED, COMPLETE, FAILED',
   source_delta_version  BIGINT,

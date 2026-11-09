@@ -5,7 +5,7 @@ Flow (idempotent per release_version):
     gate      -> read the source pinned to that Delta version, check schema / keys / coordinates / row count
     dry run   -> optionally stop here with a full diff preview (no writes)
     apply     -> one atomic MERGE into adf_usa_current (state APPLIED, rollback pointer recorded)
-    publish   -> append the slim change log for this release
+    publish   -> append the slim change log, and archive the versions this release superseded (adf_usa_history)
     validate  -> counts vs expectations, row count and content fingerprint vs the pinned source (state COMPLETE)
 
 Rollback: RESTORE adf_usa_current to the version recorded as `current_table_version` of the PREVIOUS release.
@@ -34,6 +34,8 @@ class Params:
     release_version: str = ""
     bronze_schema: str = "bronze"
     ops_schema: str = "ops"
+    silver_schema: str = "silver"
+    gold_schema: str = "gold"
     dry_run: bool = False
     source_table: str = DEFAULT_SOURCE_TABLE
     expect_added: int | None = None
@@ -57,6 +59,10 @@ class Params:
     @property
     def change_log(self):
         return f"{self.catalog}.{self.bronze_schema}.adf_usa_change_log"
+
+    @property
+    def history(self):
+        return f"{self.catalog}.{self.bronze_schema}.adf_usa_history"
 
     @property
     def release_label(self):
@@ -254,9 +260,10 @@ def diff_preview(spark, p: Params, src_h) -> dict:
 def apply_release(spark, p: Params, plan: dict, src_h) -> dict:
     seq = plan["release_seq"]
     src_h.createOrReplaceTempView("adf_src_h")
+    before = latest_version(spark, p.current)
     spark.sql(merge_sql(p, seq))
-    version = spark.sql(f"DESCRIBE HISTORY {p.current} LIMIT 1").collect()[0]["version"]
-    return {"current_table_version": version}
+    publish_history(spark, p, seq, before)
+    return {"current_table_version": latest_version(spark, p.current)}
 
 
 def publish_change_log(spark, p: Params, seq: int) -> None:
@@ -268,6 +275,47 @@ def publish_change_log(spark, p: Params, seq: int) -> None:
 SELECT release_seq, release_version, PBKEY, status AS change_type, row_hash, reappeared, changed_at
 FROM {p.current} WHERE release_seq = {seq}"""
     )
+
+
+ARCHIVE_COLUMNS = SOURCE_COLUMNS + [
+    "row_hash", "hash_spec_version", "status", "release_version", "release_seq", "changed_at", "reappeared"
+]
+
+
+def history_sql(p: Params, seq: int, prev_version: int) -> str:
+    """Archive the live versions this release superseded (updated or deleted keys), read from the table version
+    that existed before the release was applied. A resurrected key had only a tombstone, so it archives nothing."""
+    cols = ", ".join(f"o.{c}" for c in ARCHIVE_COLUMNS)
+    return f"""INSERT INTO {p.history}
+SELECT {cols}, {seq} AS valid_to_seq, '{p.release_version}' AS valid_to_version
+FROM (SELECT * FROM {p.current} VERSION AS OF {prev_version}) o
+JOIN (SELECT {KEY_COLUMN} FROM {p.current} WHERE release_seq = {seq}) n ON o.{KEY_COLUMN} = n.{KEY_COLUMN}
+WHERE o.status <> 'DELETED' AND o.release_seq < {seq}"""
+
+
+def latest_version(spark, table: str) -> int:
+    return spark.sql(f"DESCRIBE HISTORY {table} LIMIT 1").collect()[0]["version"]
+
+
+def publish_history(spark, p: Params, seq: int, prev_version: int | None = None) -> int:
+    """Archive what release `seq` superseded. Idempotent: a re-run finds the rows already there.
+
+    The apply step passes the table version it read just before the MERGE. Only the recovery path (a crash between the
+    MERGE and this step) falls back to the previous release's pointer, which time travel can only reach until the next
+    VACUUM, so it fails loudly instead of archiving nothing.
+    """
+    n = lambda: spark.table(p.history).filter(f"valid_to_seq = {seq}").count()  # noqa: E731
+    if spark.table(p.history).filter(f"valid_to_seq = {seq}").limit(1).count():
+        return n()
+    if prev_version is None:
+        prev = spark.sql(
+            f"SELECT current_table_version FROM {p.release_log} WHERE release_seq = {seq - 1} AND state = 'COMPLETE'"
+        ).collect()
+        if not prev or prev[0][0] is None:
+            raise GateError(f"release_seq {seq - 1} has no current_table_version: cannot archive the superseded versions")
+        prev_version = prev[0][0]
+    spark.sql(history_sql(p, seq, prev_version))
+    return n()
 
 
 def release_counts(spark, p: Params, seq: int) -> dict:
@@ -302,6 +350,9 @@ def validate(spark, p: Params, seq: int, label: dict, src_h=None) -> dict:
         "deleted": p.expect_deleted if p.expect_deleted is not None else label.get("vendor_deleted"),
     }
     problems = check_counts(counts, expected, p.deleted_tolerance)
+    archived = spark.table(p.history).filter(f"valid_to_seq = {seq}").count()
+    if archived != counts["updated"] + counts["deleted"]:
+        problems.append(f"history has {archived} superseded versions, expected updated+deleted = {counts['updated'] + counts['deleted']}")
     live = spark.table(p.current).filter("status <> 'DELETED'")
     cur_fp = fingerprint(live)
     if src_h is not None:
@@ -332,6 +383,7 @@ def rollback_release(spark, p: Params) -> dict:
         spark.sql(f"RESTORE TABLE {p.current} TO VERSION AS OF {prev['current_table_version']}")
         restored = True
     spark.sql(f"DELETE FROM {p.change_log} WHERE release_seq >= {seq}")
+    spark.sql(f"DELETE FROM {p.history} WHERE valid_to_seq >= {seq}")
     _log_update(spark, p, state="ROLLED_BACK", current_table_version=None, finished_at=True)
     return {"release": p.release_version, "result": "rolled_back", "restored_to": prev["current_table_version"],
             "restored": restored}
@@ -370,6 +422,7 @@ def run_release(spark, p: Params) -> dict:
         if applied:
             _log_update(spark, p, state="APPLIED", current_table_version=applied["current_table_version"])
         publish_change_log(spark, p, seq)
+        publish_history(spark, p, seq)  # no-op after apply_release; recovers a crash between the MERGE and the archive
         v = validate(spark, p, seq, label, src_h)
         if v["problems"]:
             raise RuntimeError("validation failed: " + "; ".join(v["problems"]))
