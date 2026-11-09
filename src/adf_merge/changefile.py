@@ -2,8 +2,9 @@
 
 The changefile (`adf_usa_changefile`) is replaced in full for every release and lists only that release's changes:
 CHANGE = A (added), U (updated), D (deleted). Precisely publishes it the same day as the main table's release marker (it lagged about two days once), and
-carries LATITUDE/LONGITUDE as decimal(11,6), which we cast to double (hash-identical to the main table, checked
-on release 2026.10.2: 12,856 of 12,856 rows).
+carries LATITUDE/LONGITUDE as decimal(11,6) (release 2026.10.2) or double (from 2026.10.3, after the vendor rebuilt
+the table); either is cast to double, which is hash-identical to the main table (checked on release 2026.10.2:
+12,856 of 12,856 rows). The post-apply audit against the pinned main table still catches any value drift.
 
 Decision per release:
     changefile ready + consistent  -> apply it, validate, audit against the pinned main table  (method CHANGEFILE)
@@ -26,6 +27,8 @@ CF_TYPES = {
     "CHG_CODE": "string",
     "PBKEY_ALT": "string",
 }
+# Types the vendor has published for a column, besides the one in CF_TYPES.
+CF_TYPE_ALTERNATES = {"LATITUDE": {"double"}, "LONGITUDE": {"double"}}
 CHANGE_TYPES = {"A": "added", "U": "updated", "D": "deleted"}
 
 
@@ -40,6 +43,19 @@ class ChangefileNotReady(GateError):
 # ---------------------------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------------------------
+
+
+def schema_drift(types: dict[str, str]) -> str | None:
+    """Describe how the changefile schema differs from what we accept, or None if it is fine."""
+    missing = sorted(set(CF_TYPES) - set(types))
+    extra = sorted(set(types) - set(CF_TYPES))
+    changed = sorted(
+        c for c in set(types) & set(CF_TYPES)
+        if types[c] != CF_TYPES[c] and types[c] not in CF_TYPE_ALTERNATES.get(c, ())
+    )
+    if missing or extra or changed:
+        return f"changefile schema drift: missing={missing} extra={extra} type_changed={changed}"
+    return None
 
 
 def changefile_merge_sql(p: Params, release_seq: int, view: str = "adf_cf_h") -> str:
@@ -108,11 +124,9 @@ def gate_changefile(cf, state: dict) -> dict:
     from pyspark.sql import functions as F
 
     types = {f.name: f.dataType.simpleString() for f in cf.schema}
-    if types != CF_TYPES:
-        missing = sorted(set(CF_TYPES) - set(types))
-        extra = sorted(set(types) - set(CF_TYPES))
-        changed = sorted(c for c in set(types) & set(CF_TYPES) if types[c] != CF_TYPES[c])
-        raise GateError(f"changefile schema drift: missing={missing} extra={extra} type_changed={changed}")
+    drift = schema_drift(types)
+    if drift:
+        raise GateError(drift)
     r = cf.agg(
         F.count("*").alias("n"),
         F.countDistinct(KEY_COLUMN).alias("keys"),
