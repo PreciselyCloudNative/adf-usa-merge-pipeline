@@ -13,7 +13,7 @@ Source: `docs/architecture.excalidraw` (open it at excalidraw.com to edit, then 
 
 * **Primary path: the changefile** (`precisely_product_share.precisely_db_property_graph.adf_usa_changefile`, rows with
   `CHANGE` = A/U/D). Precisely now publishes it the same day as the main table's release marker; it holds only the latest release.
-  LATITUDE/LONGITUDE are `decimal(11,6)` and are cast to double before hashing (hash-identical to the main table).
+  LATITUDE/LONGITUDE are `decimal(11,6)` or `double` (the vendor changed it with 2026.10.3) and are cast to double before hashing (hash-identical to the main table).
 * **Fallback and audit: the hash MERGE** against the main table pinned at the vendor's release commit. After a changefile
   apply, a content fingerprint is compared to the pinned main table (audit PASSED; SKIPPED if the 7-day pin has expired).
   If any gate, validation or audit fails, the release is rolled back and the MERGE runs. The reason is stored in
