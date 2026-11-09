@@ -3,7 +3,12 @@
 The vendor sets `precisely.data.vintage` / `precisely.data.count` with a SET TBLPROPERTIES commit 1-2 minutes
 AFTER its release MERGE finishes. That commit is the release marker, so:
     * a new vintage in the source history  => a finished release is available
-    * the version of that commit           => the pin (later commits, e.g. Thursday NJ deletes, belong to the NEXT release)
+    * the version of that commit           => the pin
+
+The vendor may re-mark the SAME vintage later (e.g. the Thursday NJ_DELETION job deletes rows and sets the marker
+again ~10 hours after the weekly CDC marker, with a new count). A newer marker version for a vintage than the pin we
+applied therefore means "the release changed after we took it": detect re-pins the label, and run_pending rolls the
+release back and re-applies it at the new pin (see pending_amendments).
 
 Delta Sharing cannot push events, so a scheduled job polls (detect -> release).
 """
@@ -13,7 +18,7 @@ import re
 from dataclasses import replace
 
 from adf_merge.changefile import run_release_auto
-from adf_merge.release import GateError, Params, read_source
+from adf_merge.release import GateError, Params, read_source, rollback_release
 
 VINTAGE_PROP = "precisely.data.vintage"
 COUNT_PROP = "precisely.data.count"
@@ -76,7 +81,14 @@ def retention_expired(error_text: str) -> str | None:
 
 
 def plan_detection(commits: list[dict], labels: dict[str, dict], table_props: dict) -> dict:
-    """Decide which release_label rows to seed. `labels` is {release_version: row}.
+    """Decide which release_label rows to seed and which known ones were re-marked. `labels` is {release_version: row}
+    where run_detect adds `_state`, `_seq` and `_applied_pin` (from release_log) to each.
+
+    A re-mark is a marker commit for a known vintage with a version above its pin (count may or may not change):
+        * COMPLETE and the newest applied release  -> "amend": re-pin the label, run_pending re-applies it
+        * COMPLETE but a newer release is applied  -> anomaly (needs a human; rollback only reaches the newest)
+        * not started yet, label still PROPOSED    -> "repin": just move the pin
+        * anything else in flight / CONFIRMED      -> anomaly (as before)
 
     Only vintages newer than every known label are seeded, so old history never becomes "pending".
     History before the newest tracked release's pin is ignored entirely (the vendor's older vintages are
@@ -92,7 +104,7 @@ def plan_detection(commits: list[dict], labels: dict[str, dict], table_props: di
         except DetectError as e:
             anomalies.append(str(e))
     if anomalies:
-        return {"new_labels": [], "anomalies": anomalies}
+        return {"new_labels": [], "anomalies": anomalies, "remarks": []}
 
     # latest marker commit per vintage is the pin
     by_vintage: dict[str, dict] = {}
@@ -109,14 +121,39 @@ def plan_detection(commits: list[dict], labels: dict[str, dict], table_props: di
 
     known = [vintage_key(v) for v in labels]
     newest_known = max(known) if known else None
+    complete_seqs = [r["_seq"] for r in labels.values() if r.get("_state") == "COMPLETE" and r.get("_seq") is not None]
+    newest_complete_seq = max(complete_seqs) if complete_seqs else None
     new_labels = []
+    remarks = []
     for c in ordered:
         k = vintage_key(c["vintage"])
         existing = labels.get(c["vintage"])
         if existing:
             pin = existing.get("source_delta_version")
-            skipped = existing.get("status") in SKIPPED_STATUSES or existing.get("_state") == "COMPLETE"
-            if pin is not None and pin != c["version"] and not skipped:
+            state = existing.get("_state")
+            if existing.get("status") in SKIPPED_STATUSES or pin is None or c["version"] <= pin:
+                continue
+            remark = {
+                "release_version": c["vintage"],
+                "old_pin": pin,
+                "new_pin": c["version"],
+                "old_count": existing.get("vendor_row_count"),
+                "new_count": c["count"],
+            }
+            if state == "COMPLETE":
+                applied = existing.get("_applied_pin")
+                if applied is not None and c["version"] <= applied:
+                    continue
+                if existing.get("_seq") == newest_complete_seq:
+                    remarks.append({**remark, "action": "amend"})
+                else:
+                    anomalies.append(
+                        f"{c['vintage']}: re-marked at version {c['version']} (applied {applied}) but a newer release "
+                        "is already applied; resolve by hand"
+                    )
+            elif state in (None, "ROLLED_BACK") and existing.get("status") == "PROPOSED":
+                remarks.append({**remark, "action": "repin"})
+            else:
                 anomalies.append(
                     f"{c['vintage']}: label pin {pin} differs from newest release commit {c['version']}; resolve by hand"
                 )
@@ -131,7 +168,22 @@ def plan_detection(commits: list[dict], labels: dict[str, dict], table_props: di
                 "vendor_row_count": c["count"],
             }
         )
-    return {"new_labels": new_labels, "anomalies": anomalies}
+    return {"new_labels": new_labels, "anomalies": anomalies, "remarks": remarks}
+
+
+def pending_amendments(labels: dict[str, dict], log: dict[str, dict]) -> list[dict]:
+    """The newest COMPLETE release whose label was re-pinned above the pin it was applied at (detect did that)."""
+    done = [r for r in log.values() if r["state"] == "COMPLETE"]
+    if not done:
+        return []
+    newest = max(done, key=lambda r: r["release_seq"])
+    label = labels.get(newest["release_version"])
+    if not label or label["status"] in SKIPPED_STATUSES:
+        return []
+    pin, applied = label.get("source_delta_version"), newest.get("source_delta_version")
+    if pin is None or applied is None or pin <= applied:
+        return []
+    return [label]
 
 
 def pending_releases(labels: dict[str, dict], states: dict[str, str]) -> list[dict]:
@@ -165,20 +217,32 @@ def _labels(spark, p: Params) -> dict[str, dict]:
     return {r["release_version"]: r.asDict() for r in spark.table(p.release_label).collect()}
 
 
+def _log(spark, p: Params) -> dict[str, dict]:
+    return {r["release_version"]: r.asDict() for r in spark.table(p.release_log).collect()}
+
+
 def _states(spark, p: Params) -> dict[str, str]:
-    return {r["release_version"]: r["state"] for r in spark.table(p.release_log).collect()}
+    return {v: r["state"] for v, r in _log(spark, p).items()}
 
 
 def run_detect(spark, p: Params) -> dict:
     """Seed PROPOSED labels for new vendor releases. Raises DetectError on inconsistencies."""
     labels = _labels(spark, p)
-    states = _states(spark, p)
+    log = _log(spark, p)
     for v, row in labels.items():
-        row["_state"] = states.get(v)
+        mine = log.get(v) or {}
+        row["_state"], row["_seq"], row["_applied_pin"] = mine.get("state"), mine.get("release_seq"), mine.get("source_delta_version")
     commits = parse_vintage_commits(_history(spark, p.source_table))
     plan = plan_detection(commits, labels, _table_props(spark, p.source_table))
     if plan["anomalies"]:
         raise DetectError("; ".join(plan["anomalies"]))
+    for r in plan["remarks"]:
+        count = r["new_count"] if r["new_count"] is not None else "NULL"
+        note = f"re-marked by vendor ({r['action']}): pin {r['old_pin']}->{r['new_pin']}, count {r['old_count']}->{r['new_count']}"
+        spark.sql(
+            f"""UPDATE {p.release_label} SET source_delta_version = {r['new_pin']}, vendor_row_count = {count},
+            notes = concat_ws(' | ', notes, '{note}') WHERE release_version = '{r['release_version']}'"""
+        )
     for n in plan["new_labels"]:
         date = f"DATE'{n['release_date']}'" if n["release_date"] else "NULL"
         count = n["vendor_row_count"] if n["vendor_row_count"] is not None else "NULL"
@@ -191,6 +255,7 @@ def run_detect(spark, p: Params) -> dict:
     pending = pending_releases(_labels(spark, p), _states(spark, p))
     return {
         "seeded": [n["release_version"] for n in plan["new_labels"]],
+        "remarked": plan["remarks"],
         "pending": [r["release_version"] for r in pending],
     }
 
@@ -203,6 +268,28 @@ def pin_readable(spark, p: Params, pin: int) -> bool:
         return False
 
 
+def run_amendments(spark, p: Params) -> list[dict]:
+    """Re-apply the newest COMPLETE release if the vendor re-marked it (label pin moved above the applied pin).
+
+    Rolls it back (RESTORE to the previous release's version, drop its change-log rows) and runs it again at the new
+    pin, changefile first. If anything fails the release is left FAILED/ROLLED_BACK and is picked up as an ordinary
+    pending release on the next run.
+    """
+    results = []
+    labels, log = _labels(spark, p), _log(spark, p)
+    for label in pending_amendments(labels, log):
+        version = label["release_version"]
+        # No deferral here: after the rollback the table is missing this release, so use the changefile if it is ready
+        # right now and otherwise run the MERGE immediately instead of waiting days for the changefile.
+        pp = replace(p, release_version=version, changefile_wait_days=0)
+        rolled = rollback_release(spark, pp)
+        out = run_release_auto(spark, pp)
+        out["amended"] = {"from_pin": log[version]["source_delta_version"], "to_pin": label["source_delta_version"],
+                          "rollback": rolled}
+        results.append(out)
+    return results
+
+
 def run_pending(spark, p: Params, require_confirmed: bool = False) -> dict:
     """Apply every pending release in order, one at a time. Stops (raises) on the first failure,
     or quietly when a release is deferred while its changefile has not arrived.
@@ -211,8 +298,10 @@ def run_pending(spark, p: Params, require_confirmed: bool = False) -> dict:
     marked SUPERSEDED: the later release diffs against our current state, so no change is lost, it is just
     attributed to the later release_version.
     """
+    results = run_amendments(spark, p)
+    if results and results[-1]["result"] == "deferred":  # later releases wait for it
+        return {"applied": results}
     pending = pending_releases(_labels(spark, p), _states(spark, p))
-    results = []
     for i, label in enumerate(pending):
         version = label["release_version"]
         if require_confirmed and label["status"] != "CONFIRMED":

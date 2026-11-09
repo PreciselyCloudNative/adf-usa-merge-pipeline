@@ -79,6 +79,25 @@ def expected_live_rows(live: int, counts: dict) -> int:
     return live + counts["added"] - counts["deleted"]
 
 
+def _as_datetime(t):
+    if isinstance(t, str):
+        return datetime.datetime.fromisoformat(t.replace("Z", "+00:00"))
+    return t
+
+
+def marker_is_stale(changefile_at, main_at, slack_minutes: int = 10) -> bool:
+    """True if the changefile's release marker is older than the main table's marker by more than the slack.
+
+    The vendor re-marks the main table (e.g. NJ deletions) and then the changefile about a minute later; between the
+    two the changefile still describes the previous state of the release. Unknown timestamps never count as stale.
+    """
+    try:
+        a, b = _as_datetime(changefile_at), _as_datetime(main_at)
+        return a is not None and b is not None and (b - a) > datetime.timedelta(minutes=slack_minutes)
+    except (TypeError, ValueError):
+        return False
+
+
 def is_deferrable(label: dict, wait_days: int, today: datetime.date | None = None) -> bool:
     d = label.get("release_date")
     if d is None or wait_days <= 0:
@@ -93,8 +112,12 @@ def is_deferrable(label: dict, wait_days: int, today: datetime.date | None = Non
 # ---------------------------------------------------------------------------------------------
 
 
-def changefile_state(spark, p: Params, release_version: str) -> dict:
-    """Is the changefile at this release? Returns the version to read (the vendor's marker commit)."""
+def changefile_state(spark, p: Params, release_version: str, main_marker_at=None) -> dict:
+    """Is the changefile at this release? Returns the version to read (the vendor's marker commit).
+
+    `main_marker_at` is the commit time of the main table's marker we pinned; a changefile marked well before it has
+    not been re-published for this release yet.
+    """
     from adf_merge import detect
 
     try:
@@ -112,8 +135,25 @@ def changefile_state(spark, p: Params, release_version: str) -> dict:
     marks = [c for c in history if c["vintage"] == release_version]
     if not marks:
         raise ChangefileNotReady("no release marker commit in changefile history", deferrable=True)
+    if marker_is_stale(marks[-1]["committed_at"], main_marker_at):
+        raise ChangefileNotReady(
+            f"changefile marker ({marks[-1]['committed_at']}) is older than the main-table marker ({main_marker_at}): "
+            "not re-published for this release yet",
+            deferrable=True,
+        )
     count = props.get(detect.COUNT_PROP)
     return {"version": marks[-1]["version"], "count": int(count) if count not in (None, "") else None}
+
+
+def main_marker_time(spark, p: Params, pin):
+    """Commit time of the pinned main-table marker, or None if it cannot be determined."""
+    from adf_merge import detect
+
+    try:
+        commits = detect.parse_vintage_commits(detect._history(spark, p.source_table))
+    except Exception:  # noqa: BLE001 - the guard is best effort; the precheck still protects the apply
+        return None
+    return next((c["committed_at"] for c in commits if c["version"] == pin), None)
 
 
 def read_changefile(spark, p: Params, version: int):
@@ -182,7 +222,7 @@ def run_release_changefile(spark, p: Params, plan: dict) -> dict:
 
     label, seq = plan["label"], plan["release_seq"]
     pin = label["source_delta_version"]
-    state = changefile_state(spark, p, p.release_version)
+    state = changefile_state(spark, p, p.release_version, main_marker_time(spark, p, pin))
     cf = read_changefile(spark, p, state["version"])
     counts = gate_changefile(cf, state)
     cf_h = hashed_changefile(cf)
@@ -197,7 +237,8 @@ def run_release_changefile(spark, p: Params, plan: dict) -> dict:
                     {rel.HASH_SPEC_VERSION}, current_timestamp())"""
         )
     else:
-        rel._log_update(spark, p, run_id=p.run_id, state="STARTED", error=None)
+        rel._log_update(spark, p, run_id=p.run_id, state="STARTED", error=None, source_delta_version=pin,
+                        source_row_count=rows_expected)
 
     try:
         already = spark.table(p.current).filter(f"release_seq = {seq}").limit(1).count() > 0

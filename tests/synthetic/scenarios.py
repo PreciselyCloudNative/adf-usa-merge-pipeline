@@ -379,16 +379,16 @@ def s12_detect_and_thursday_delete(env: Env):
     pin1 = env.mark_release("2099.01.1")
     env.src_delete(200, 203)                 # Thursday NJ delete AFTER the release marker: belongs to the NEXT release
     d = detect.run_detect(env.spark, env.p)
-    eq(d, {"seeded": ["2099.01.1"], "pending": ["2099.01.1"]}, "first detect")
+    eq(d, {"seeded": ["2099.01.1"], "remarked": [], "pending": ["2099.01.1"]}, "first detect")
     lab = env.sql(f"SELECT * FROM {env.p.release_label} WHERE release_version = '2099.01.1'").collect()[0]
     eq((lab["status"], lab["source_delta_version"], lab["vendor_row_count"]), ("PROPOSED", pin1, N + 6), "seeded label")
-    eq(detect.run_detect(env.spark, env.p), {"seeded": [], "pending": ["2099.01.1"]}, "detect is idempotent")
+    eq(detect.run_detect(env.spark, env.p), {"seeded": [], "remarked": [], "pending": ["2099.01.1"]}, "detect is idempotent")
     out = detect.run_pending(env.spark, env.p)
     eq(out["applied"][0]["counts"], {"added": 6, "updated": 0, "deleted": 0, "reappeared": 0}, "release 1 excludes the later delete")
     check(env.row(200)["status"] == "BASELINE", "Thursday delete not in this release")
     pin2 = env.mark_release("2099.01.2")
     d = detect.run_detect(env.spark, env.p)
-    eq(d, {"seeded": ["2099.01.2"], "pending": ["2099.01.2"]}, "second detect")
+    eq(d, {"seeded": ["2099.01.2"], "remarked": [], "pending": ["2099.01.2"]}, "second detect")
     out = detect.run_pending(env.spark, env.p)
     eq(out["applied"][0]["counts"]["deleted"], 3, "Thursday delete lands in the next release")
     eq(detect.run_pending(env.spark, env.p), {"applied": []}, "nothing pending afterwards")
@@ -493,6 +493,29 @@ def _release_via_changefile(env: Env, vintage, *, ins=None, upd=None, dele=None,
     env.label(vintage, pin, added=n(ins), updated=n(upd), deleted=n(dele), rows=rows)
     env.write_changefile(vintage, added=ins, updated=upd, deleted=dele, **cf_kw)
     return pin
+
+
+def s18_remarked_release_is_reapplied(env: Env):
+    """The vendor deletes rows and sets the SAME vintage again after we applied it (NJ_DELETION): roll back, re-apply."""
+    env.src_insert(N, N + 6)
+    pin1 = env.mark_release("2099.01.1")
+    detect.run_detect(env.spark, env.p)
+    out = detect.run_pending(env.spark, env.p)
+    eq(out["applied"][0]["counts"], {"added": 6, "updated": 0, "deleted": 0, "reappeared": 0}, "first apply")
+    env.src_delete(200, 203)
+    pin2 = env.mark_release("2099.01.1")
+    d = detect.run_detect(env.spark, env.p)
+    eq([(r["action"], r["old_pin"], r["new_pin"], r["new_count"]) for r in d["remarked"]],
+       [("amend", pin1, pin2, N + 3)], "re-mark detected")
+    r = detect.run_pending(env.spark, env.p)["applied"][0]
+    eq((r["result"], r["release_seq"]), ("complete", 2), "re-applied under the same release_seq")
+    eq(r["counts"], {"added": 6, "updated": 0, "deleted": 3, "reappeared": 0}, "release now includes the delete")
+    eq(env.sql(f"SELECT source_delta_version FROM {env.p.release_log} WHERE release_version = '2099.01.1'").collect()[0][0],
+       pin2, "log carries the new pin")
+    eq(env.change_log_counts(2), {"ADDED": 6, "DELETED": 3}, "change log rebuilt for the release")
+    check(env.row(200)["status"] == "DELETED", "deleted row applied")
+    eq(detect.run_detect(env.spark, env.p)["remarked"], [], "re-mark not reported again")
+    eq(detect.run_pending(env.spark, env.p), {"applied": []}, "nothing left to do")
 
 
 def c01_changefile_primary(env: Env):
