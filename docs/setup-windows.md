@@ -172,4 +172,4 @@ next Precisely release (weekly), once its changefile has landed (normally the sa
 
 ## Next
 
-[Verify the run and drop the baseline table](../README.md#verify-and-finish-setup).
+[Verify the run and drop the baseline table](operations.md#verify).
