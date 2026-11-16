@@ -771,4 +771,20 @@ def g04_crash_before_archive_recovers(env: Env):
     eq(env.gold_fingerprint("2099.01.1"), env.pinned("2099.01.1"), "release reproducible after recovery")
 
 
+def s31_remarked_baseline_is_reapplied(env: Env):
+    """The vendor re-marks the FIRST release (the baseline). It has no earlier release to RESTORE to, so the rollback
+    empties the table and the baseline is reloaded by MERGE at the new pin."""
+    env.src_delete(200, 203)
+    pin2 = env.mark_release(BASE_VINTAGE)
+    d = detect.run_detect(env.spark, env.p)
+    eq([(r["action"], r["new_pin"], r["new_count"]) for r in d["remarked"]], [("amend", pin2, N - 3)], "re-mark detected")
+    r = detect.run_pending(env.spark, env.p)["applied"][0]
+    eq((r["result"], r["release_seq"]), ("complete", 1), "baseline re-applied under seq 1")
+    eq(env.sql(f"SELECT count(*) FROM {env.p.current} WHERE status <> 'DELETED'").collect()[0][0], N - 3, "live rows")
+    eq(env.log_state(BASE_VINTAGE), "COMPLETE", "state after re-apply")
+    eq(env.sql(f"SELECT source_delta_version FROM {env.p.release_log} WHERE release_version = '{BASE_VINTAGE}'").collect()[0][0],
+       pin2, "log carries the new pin")
+    eq(detect.run_pending(env.spark, env.p), {"applied": []}, "nothing left to do")
+
+
 SCENARIOS = [v for k, v in sorted(globals().items()) if re.match(r"[scg]\d\d_", k)]

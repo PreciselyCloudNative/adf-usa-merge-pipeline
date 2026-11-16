@@ -282,6 +282,9 @@ def run_amendments(spark, p: Params) -> list[dict]:
         # No deferral here: after the rollback the table is missing this release, so use the changefile if it is ready
         # right now and otherwise run the MERGE immediately instead of waiting days for the changefile.
         pp = replace(p, release_version=version, changefile_wait_days=0)
+        if log[version]["release_seq"] == 1:
+            # A changefile is a delta against the previous release; the baseline has none, so reload it by MERGE.
+            pp = replace(pp, use_changefile=False)
         rolled = rollback_release(spark, pp)
         out = run_release_auto(spark, pp)
         out["amended"] = {"from_pin": log[version]["source_delta_version"], "to_pin": label["source_delta_version"],

@@ -219,14 +219,14 @@ def gate_source(spark, p: Params, src, label: dict) -> dict:
         raise GateError(f"source rows {s['n']} != vendor_row_count {label['vendor_row_count']}")
 
     cur = spark.table(p.current)
-    specs = [r[0] for r in cur.filter("status <> 'DELETED'").select("hash_spec_version").distinct().collect()]
-    if specs != [HASH_SPEC_VERSION]:
-        raise GateError(f"current hash_spec_version {specs} != code {HASH_SPEC_VERSION}; migrate first")
-
     live = cur.filter("status <> 'DELETED'").count()
     pct = row_count_change_pct(s["n"], live)
-    if pct > p.max_row_count_change_pct and not p.allow_large_change:
-        raise GateError(f"row count moves {pct:.2f}% (> {p.max_row_count_change_pct}%): source {s['n']} vs live {live}")
+    if cur.limit(1).count():  # an empty table (baseline being reloaded after a rollback) has nothing to compare to
+        specs = [r[0] for r in cur.filter("status <> 'DELETED'").select("hash_spec_version").distinct().collect()]
+        if specs != [HASH_SPEC_VERSION]:
+            raise GateError(f"current hash_spec_version {specs} != code {HASH_SPEC_VERSION}; migrate first")
+        if pct > p.max_row_count_change_pct and not p.allow_large_change:
+            raise GateError(f"row count moves {pct:.2f}% (> {p.max_row_count_change_pct}%): source {s['n']} vs live {live}")
     return {"source_rows": s["n"], "current_live_rows": live, "row_count_change_pct": round(pct, 4)}
 
 
@@ -307,6 +307,8 @@ def publish_history(spark, p: Params, seq: int, prev_version: int | None = None)
     n = lambda: spark.table(p.history).filter(f"valid_to_seq = {seq}").count()  # noqa: E731
     if spark.table(p.history).filter(f"valid_to_seq = {seq}").limit(1).count():
         return n()
+    if seq == 1:
+        return 0  # the first release supersedes nothing
     if prev_version is None:
         prev = spark.sql(
             f"SELECT current_table_version FROM {p.release_log} WHERE release_seq = {seq - 1} AND state = 'COMPLETE'"
@@ -365,7 +367,8 @@ def validate(spark, p: Params, seq: int, label: dict, src_h=None) -> dict:
 def rollback_release(spark, p: Params) -> dict:
     """Undo the newest release: RESTORE current to the previous release's pointer, drop its change-log rows.
 
-    Only the newest release can be rolled back. The release_log row is kept as ROLLED_BACK (audit) and the
+    Only the newest release can be rolled back. Rolling back the first release (the baseline) empties the table, as
+    there is no earlier release to restore to. The release_log row is kept as ROLLED_BACK (audit) and the
     release can then be re-run.
     """
     log = sorted((r.asDict() for r in spark.table(p.release_log).collect()), key=lambda r: r["release_seq"])
@@ -375,18 +378,24 @@ def rollback_release(spark, p: Params) -> dict:
     if target["release_seq"] != log[-1]["release_seq"]:
         raise GateError(f"{p.release_version} is not the newest release; only the newest can be rolled back")
     seq = target["release_seq"]
+    first = not any(r["release_seq"] < seq for r in log)  # the baseline: nothing earlier to restore to
     prev = next((r for r in reversed(log) if r["release_seq"] == seq - 1 and r["state"] == "COMPLETE"), None)
-    if not prev or prev["current_table_version"] is None:
+    if not first and (not prev or prev["current_table_version"] is None):
         raise GateError(f"no rollback pointer: release_seq {seq - 1} is missing or has no current_table_version")
     restored = False
     if spark.table(p.current).filter(f"release_seq >= {seq}").limit(1).count():
-        spark.sql(f"RESTORE TABLE {p.current} TO VERSION AS OF {prev['current_table_version']}")
+        if first:
+            # The pre-release state is an empty table. DELETE (not TRUNCATE) keeps the Delta history, so the old
+            # contents stay recoverable with RESTORE until VACUUM.
+            spark.sql(f"DELETE FROM {p.current} WHERE release_seq >= {seq}")
+        else:
+            spark.sql(f"RESTORE TABLE {p.current} TO VERSION AS OF {prev['current_table_version']}")
         restored = True
     spark.sql(f"DELETE FROM {p.change_log} WHERE release_seq >= {seq}")
     spark.sql(f"DELETE FROM {p.history} WHERE valid_to_seq >= {seq}")
     _log_update(spark, p, state="ROLLED_BACK", current_table_version=None, finished_at=True)
-    return {"release": p.release_version, "result": "rolled_back", "restored_to": prev["current_table_version"],
-            "restored": restored}
+    return {"release": p.release_version, "result": "rolled_back",
+            "restored_to": prev["current_table_version"] if prev else None, "restored": restored}
 
 
 def run_release(spark, p: Params) -> dict:
