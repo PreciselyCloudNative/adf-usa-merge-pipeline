@@ -12,7 +12,7 @@ Covers hashing, release and gold helpers, SQL generation and detection. No Datab
 
 ## Synthetic scenarios (Databricks)
 
-30 end-to-end scenarios: normal release, resurrection, rebuild, schema drift, rollback, missed releases, changefile
+31 end-to-end scenarios: normal release, resurrection, rebuild, schema drift, rollback, missed releases, changefile
 fallbacks, and release-view exactness. Each runs on a throwaway source table in `zz_syn_*` schemas that are dropped afterwards.
 
 ```bash

@@ -53,7 +53,7 @@ Verify a run, change parameters, confirm counts, roll back, handle alerts and re
 .venv/bin/python -m pytest tests -q    # Windows: .venv\Scripts\python.exe
 ```
 
-Local unit tests plus 30 synthetic scenarios on Databricks: [testing](docs/testing.md).
+Local unit tests plus 31 synthetic scenarios on Databricks: [testing](docs/testing.md).
 
 ## Repo layout
 
