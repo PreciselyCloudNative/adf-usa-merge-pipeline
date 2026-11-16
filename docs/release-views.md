@@ -19,6 +19,14 @@ After every run, `adf-release` (`adf_merge.gold.refresh`):
 * tags the newest view `release_status = latest` and older ones `archived`;
 * drops the view of a rolled-back release.
 
+## Reading `status` in a release view
+
+`status` is the status a row had at its **last change**, not relative to the view's release. In `adf_usa_2026_10_3`
+(the baseline) every row is `BASELINE`. In the next release's view, rows untouched since the baseline stay `BASELINE`,
+new rows are `ADDED` and changed rows are `UPDATED`. Filter on `release_seq` to see only what that release changed.
+
+A baseline that is reloaded after the vendor re-marks it keeps `BASELINE` (it is never relabelled `ADDED`).
+
 ## Guarantees and limits
 
 * **Exact:** the synthetic suite proves every release view equals the vendor table at that release's pin. Each release's

@@ -34,3 +34,11 @@ def test_merge_sql_shape():
     # tombstones null every attribute and the hash
     assert sql.count("= NULL") == 31 + 1
     assert "release_seq = 2" in sql and "release_version = '2026.10.2'" in sql
+
+
+def test_merge_inserts_baseline_status_only_for_first_release():
+    first = merge_sql(Params(catalog="c", release_version="2026.10.3"), 1)
+    later = merge_sql(Params(catalog="c", release_version="2026.10.4"), 2)
+    # inserts take the status from the release position; updates/resurrections keep their own literals
+    assert "'BASELINE', '2026.10.3', 1" in first and "'ADDED', '2026.10.3', 1" not in first
+    assert "'ADDED', '2026.10.4', 2" in later and "BASELINE" not in later

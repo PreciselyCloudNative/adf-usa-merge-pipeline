@@ -781,6 +781,7 @@ def s31_remarked_baseline_is_reapplied(env: Env):
     r = detect.run_pending(env.spark, env.p)["applied"][0]
     eq((r["result"], r["release_seq"]), ("complete", 1), "baseline re-applied under seq 1")
     eq(env.sql(f"SELECT count(*) FROM {env.p.current} WHERE status <> 'DELETED'").collect()[0][0], N - 3, "live rows")
+    eq(env.current_counts(), {"BASELINE": N - 3}, "reloaded baseline rows are BASELINE, not ADDED")
     eq(env.log_state(BASE_VINTAGE), "COMPLETE", "state after re-apply")
     eq(env.sql(f"SELECT source_delta_version FROM {env.p.release_log} WHERE release_version = '{BASE_VINTAGE}'").collect()[0][0],
        pin2, "log carries the new pin")
