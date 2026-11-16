@@ -78,6 +78,10 @@ class Params:
 # ---------------------------------------------------------------------------------------------
 
 
+BASELINE_STATUS = "BASELINE"
+FIRST_RELEASE_SEQ = 1
+
+
 def check_counts(actual: dict, expected: dict, deleted_tolerance: int) -> list[str]:
     """Compare ADDED/UPDATED exactly and DELETED within tolerance. Returns a list of problems."""
     problems = []
@@ -107,9 +111,11 @@ def merge_parts(p: Params, release_seq: int) -> dict:
         SOURCE_COLUMNS
         + ["row_hash", "hash_spec_version", "status", "release_version", "release_seq", "changed_at", "reappeared"]
     )
+    # The first release is the baseline: its rows are BASELINE, not ADDED (bootstrap_load_current.py does the same).
+    insert_status = BASELINE_STATUS if release_seq == FIRST_RELEASE_SEQ else "ADDED"
     insert_vals = ", ".join(
         [f"s.{c}" for c in SOURCE_COLUMNS]
-        + ["s.row_hash", str(HASH_SPEC_VERSION), "'ADDED'", f"'{p.release_version}'", str(release_seq),
+        + ["s.row_hash", str(HASH_SPEC_VERSION), f"'{insert_status}'", f"'{p.release_version}'", str(release_seq),
            "current_timestamp()", "false"]
     )
     return {
@@ -267,6 +273,8 @@ def apply_release(spark, p: Params, plan: dict, src_h) -> dict:
 
 
 def publish_change_log(spark, p: Params, seq: int) -> None:
+    if seq == FIRST_RELEASE_SEQ:
+        return  # the baseline is not a change: bootstrap writes no change-log rows for it either
     existing = spark.table(p.change_log).filter(f"release_seq = {seq}").limit(1).count()
     if existing:
         return  # re-run after a crash between MERGE and publish
@@ -346,11 +354,14 @@ def fingerprint(df):
 def validate(spark, p: Params, seq: int, label: dict, src_h=None) -> dict:
     """Counts vs expectations; with src_h also row count + content fingerprint vs the pinned source."""
     counts = release_counts(spark, p, seq)
-    expected = {
-        "added": p.expect_added if p.expect_added is not None else label.get("vendor_added"),
-        "updated": p.expect_updated if p.expect_updated is not None else label.get("vendor_updated"),
-        "deleted": p.expect_deleted if p.expect_deleted is not None else label.get("vendor_deleted"),
-    }
+    if seq == FIRST_RELEASE_SEQ:  # a baseline has no added/updated/deleted to compare to
+        expected = {"added": None, "updated": None, "deleted": None}
+    else:
+        expected = {
+            "added": p.expect_added if p.expect_added is not None else label.get("vendor_added"),
+            "updated": p.expect_updated if p.expect_updated is not None else label.get("vendor_updated"),
+            "deleted": p.expect_deleted if p.expect_deleted is not None else label.get("vendor_deleted"),
+        }
     problems = check_counts(counts, expected, p.deleted_tolerance)
     archived = spark.table(p.history).filter(f"valid_to_seq = {seq}").count()
     if archived != counts["updated"] + counts["deleted"]:
@@ -436,7 +447,10 @@ def run_release(spark, p: Params) -> dict:
         if v["problems"]:
             raise RuntimeError("validation failed: " + "; ".join(v["problems"]))
         c = v["counts"]
-        _log_update(spark, p, state="COMPLETE", added=c["added"], updated=c["updated"], deleted=c["deleted"],
+        # The baseline's log row carries NULL counts (as bootstrap writes it); gold.adf_usa_versions then shows the label's.
+        nul = seq == FIRST_RELEASE_SEQ
+        _log_update(spark, p, state="COMPLETE", added=None if nul else c["added"], updated=None if nul else c["updated"],
+                    deleted=None if nul else c["deleted"],
                     method=p.method, fallback_reason=p.fallback_reason, audit="PASSED", finished_at=True)
         return {"release": p.release_version, "result": "complete", "release_seq": seq, "pin": pin, "gates": gates,
                 "counts": c, "expected": v["expected"], "row_count": v["row_count"], **applied}
